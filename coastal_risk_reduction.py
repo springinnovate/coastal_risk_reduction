@@ -13,6 +13,7 @@ import os
 import shutil
 import tempfile
 import threading
+import sys
 
 from ecoshard import geoprocessing
 from ecoshard import taskgraph
@@ -193,8 +194,7 @@ logging.basicConfig(
     level=logging.DEBUG,
     format=(
         '%(asctime)s (%(relativeCreated)d) %(levelname)s %(name)s'
-        ' [%(pathname)s.%(funcName)s:%(lineno)d] %(message)s'),
-    filename='globalcvlog.txt')
+        ' [%(pathname)s.%(funcName)s:%(lineno)d] %(message)s'))
 LOGGER = logging.getLogger(__name__)
 
 STOP_SENTINEL = 'STOP'
@@ -218,7 +218,13 @@ HABITAT_VECTOR_PATH_MAP = {
         os.path.join(
             ECOSHARD_DIR, os.path.basename(GLOBAL_DATA_URL_MAP['seagrass'])),
         4, 500.0),
-    }
+}
+
+
+def _parse_non_default_options(config, section):
+    return set([
+        x for x in config[section]
+        if x not in config._defaults])
 
 
 def download_and_ungzip(url, target_path, buffer_size=2**20):
@@ -2462,6 +2468,37 @@ def calculate_degree_cell_cv(
     add_cv_vector_risk(target_cv_vector_path)
 
 
+def _validate_ini(ini_config, scenario_id):
+    """Verify that the ini file has correct structure.
+
+    Args:
+        ini_config (configparser obj): config parsed object with
+            'expected_keys' and '`scenario_id`' as fields.
+
+        scenario_id (str): expected section in `ini_config`.
+
+    Returns true if correct validation otheriwse raises Exception.
+    """
+    scenario_config = config[scenario_id]
+    missing_keys = []
+    for key in config['expected_keys']:
+        if key not in scenario_config:
+            missing_keys.append(key)
+    if missing_keys:
+        raise ValueError(
+            f'expected the following keys in "{args.scenario_config_path}" but '
+            f'not found: "{", ".join(missing_keys)}"')
+    for key in scenario_config:
+        LOGGER.debug(key)
+        path = scenario_config[key]
+        if key.endswith('_path') and not os.path.exists(scenario_config[key]):
+            raise ValueError(
+                f'expected a file from "{key}" at "{scenario_config[key]}" '
+                f'but file not found')
+        else:
+            LOGGER.debug(path)
+
+
 if __name__ == '__main__':
     LOGGER.debug('starting')
     parser = argparse.ArgumentParser(description='Global CV analysis')
@@ -2474,9 +2511,16 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     config = configparser.ConfigParser(allow_no_value=True)
-    config.read(args.scenario_config)
-    LOGGER.debug(config)
+
+    config.read('global_config.ini')
+    config.read(args.scenario_config_path)
+    scenario_id = os.path.basename(
+        os.path.splitext(args.scenario_config_path)[0])
+    _validate_ini(config, scenario_id)
     sys.exit()
+
+    LOGGER.debug(eval(config['luzon']['LULC_CODE_TO_HAB_MAP']))
+    LOGGER.debug(config['luzon']['DEM'])
 
     LOGGER.debug('parsing args')
 
