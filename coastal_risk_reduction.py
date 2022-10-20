@@ -2227,29 +2227,31 @@ def _process_scenario_ini(scenario_config_path):
 
     Raises errors if config file not formatted correctly
     """
-    scenario_config = configparser.ConfigParser(allow_no_value=True)
-    scenario_config.read(GLOBAL_INI_PATH)
-    scenario_config.read(scenario_config_path)
+    global_config = configparser.ConfigParser(allow_no_value=True)
+    global_config.read(GLOBAL_INI_PATH)
+    global_config.read(scenario_config_path)
     scenario_id = os.path.basename(os.path.splitext(scenario_config_path)[0])
-    if scenario_id not in scenario_config:
+    if scenario_id not in global_config:
         raise ValueError(
             f'expected a section called [{scenario_id}] in configuration file'
             f'but was not found')
-    scenario_config = scenario_config[scenario_id]
+    scenario_config = global_config[scenario_id]
     missing_keys = []
-    for key in scenario_config['expected_keys']:
+    for key in global_config['expected_keys']:
         if key not in scenario_config:
             missing_keys.append(key)
     if missing_keys:
         raise ValueError(
             f'expected the following keys in "{scenario_config_path}" '
             f'but not found: "{", ".join(missing_keys)}"')
+    LOGGER.debug(scenario_config)
     for key in scenario_config:
-        possible_path = scenario_config[key]
-        if key.endswith('_path') and not os.path.exists(possible_path):
-            raise ValueError(
-                f'expected a file from "{key}" at "{possible_path}" '
-                f'but file not found')
+        if key.endswith('_path'):
+            possible_path = scenario_config[key]
+            if not os.path.exists(possible_path):
+                raise ValueError(
+                    f'expected a file from "{key}" at "{possible_path}" '
+                    f'but file not found')
 
     for _, _, hab_path in eval(scenario_config[HABITAT_MAP_KEY]).values():
         if not os.path.exists(hab_path):
@@ -2279,38 +2281,36 @@ def main():
             scenario_config_path)
         config_scenario_list.append((scenario_config, scenario_id))
 
-    for config, scenario_id in config_scenario_list:
-        habitat_map = eval(config[scenario_id][HABITAT_MAP_KEY])
+    for scenario_config, scenario_id in config_scenario_list:
+        habitat_map = eval(scenario_config[HABITAT_MAP_KEY])
         local_data_path_map = {
-            'wwiii': config[scenario_id]['WWIII_PATH'],
-            'slr': config[scenario_id]['SLR_PATH'],
-            'geomorphology': config[scenario_id]['GEOMORPHOLOGY_PATH'],
-            'reefs': config[scenario_id]['REEFS_PATH'],
-            'mangroves': config[scenario_id]['MANGROVES_PATH'],
-            'seagrass': config[scenario_id]['SEAGRASS_PATH'],
-            'saltmarsh': config[scenario_id]['SALTMARSH_PATH'],
-            'dem': config[scenario_id]['DEM_PATH'],
-            'lulc': config[scenario_id]['LULC_PATH'],
-            'global_polygon': config[scenario_id]['GLOBAL_POLYGON_PATH'],
-            'buffer_vector': config[scenario_id]['BUFFER_VECTOR_PATH'],
-            'shore_grid': config[scenario_id]['SHORE_GRID_PATH'],
+            'wwiii': scenario_config['WWIII_PATH'],
+            'slr': scenario_config['SLR_PATH'],
+            'geomorphology': scenario_config['GEOMORPHOLOGY_PATH'],
+            'dem': scenario_config['DEM_PATH'],
+            'lulc': scenario_config['LULC_PATH'],
+            'global_polygon': scenario_config['GLOBAL_POLYGON_PATH'],
+            'buffer_vector': scenario_config['BUFFER_VECTOR_PATH'],
+            'shore_grid': scenario_config['SHORE_GRID_PATH'],
         }
-        return
-        landcover_basename = os.path.splitext(
-            os.path.basename(landcover_url))[0]
+        LOGGER.debug(habitat_map)
+        LOGGER.debug(local_data_path_map)
+
         hash_obj = hashlib.sha256()
-        hash_obj.update(landcover_basename.encode('utf-8'))
+        hash_obj.update(scenario_id.encode('utf-8'))
         landcover_hash = hash_obj.hexdigest()[0:3]
         local_workspace_dir = os.path.join(WORKSPACE_DIR, landcover_hash)
         with open('hashtrans.txt', 'a') as hash_file:
-            hash_file.write(f'{landcover_basename} -> {landcover_hash}\n')
+            hash_file.write(f'{scenario_id} -> {landcover_hash}\n')
         local_habitat_value_dir = os.path.join(
             WORKSPACE_DIR, landcover_hash, 'value_rasters')
         for dir_path in [local_workspace_dir, local_habitat_value_dir]:
             os.makedirs(dir_path, exist_ok=True)
         target_cv_vector_path = os.path.join(
-            local_workspace_dir, '%s.gpkg' % landcover_basename)
+            local_workspace_dir, '%s.gpkg' % scenario_id)
         habitat_raster_risk_dist_map = preprocess_habitat(landcover_hash)
+
+        return
 
         calculate_cv_vector_task = task_graph.add_task(
             func=calculate_degree_cell_cv,
