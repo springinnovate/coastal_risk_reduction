@@ -2280,7 +2280,7 @@ def main():
         config_scenario_list.append((scenario_config, scenario_id))
 
     for config, scenario_id in config_scenario_list:
-        habitat_map = eval(config[scenario_id]['habitat'])
+        habitat_map = eval(config[scenario_id][HABITAT_MAP_KEY])
         local_data_path_map = {
             'wwiii': config[scenario_id]['WWIII_PATH'],
             'slr': config[scenario_id]['SLR_PATH'],
