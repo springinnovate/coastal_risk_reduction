@@ -31,6 +31,7 @@ gdal.SetCacheMax(2**25)
 WORKSPACE_DIR = 'global_cv_workspace'
 CHURN_DIR = os.path.join(WORKSPACE_DIR, 'cn')
 ECOSHARD_DIR = os.path.join(WORKSPACE_DIR, 'es')
+GLOBAL_INI_PATH = 'global_config.ini'
 
 HABITAT_MAP_KEY = 'HABITAT_MAP'  # key in ini file with hab risk/dist/path map
 
@@ -2214,44 +2215,48 @@ def calculate_degree_cell_cv(
     add_cv_vector_risk(target_cv_vector_path)
 
 
-def _validate_ini(ini_config, scenario_id):
+def _process_scenario_ini(scenario_config_path):
     """Verify that the ini file has correct structure.
 
     Args:
         ini_config (configparser obj): config parsed object with
             'expected_keys' and '`scenario_id`' as fields.
 
-        scenario_id (str): expected section in `ini_config`.
+    Returns
+        (configparser object, scenario id)
 
-    Returns True if correct validation otheriwse raises Exception.
+    Raises errors if config file not formatted correctly
     """
-    if scenario_id not in ini_config:
+    scenario_config = configparser.ConfigParser(allow_no_value=True)
+    scenario_config.read(GLOBAL_INI_PATH)
+    scenario_config.read(scenario_config_path)
+    scenario_id = os.path.basename(os.path.splitext(scenario_config_path)[0])
+    if scenario_id not in scenario_config:
         raise ValueError(
             f'expected a section called [{scenario_id}] in configuration file'
             f'but was not found')
-    scenario_config = ini_config[scenario_id]
+    scenario_config = scenario_config[scenario_id]
     missing_keys = []
-    for key in ini_config['expected_keys']:
+    for key in scenario_config['expected_keys']:
         if key not in scenario_config:
             missing_keys.append(key)
     if missing_keys:
         raise ValueError(
-            f'expected the following keys in "{args.scenario_config_path}" '
+            f'expected the following keys in "{scenario_config_path}" '
             f'but not found: "{", ".join(missing_keys)}"')
     for key in scenario_config:
-        LOGGER.debug(key)
-        path = scenario_config[key]
-        if key.endswith('_path') and not os.path.exists(scenario_config[key]):
+        possible_path = scenario_config[key]
+        if key.endswith('_path') and not os.path.exists(possible_path):
             raise ValueError(
-                f'expected a file from "{key}" at "{scenario_config[key]}" '
+                f'expected a file from "{key}" at "{possible_path}" '
                 f'but file not found')
 
-    for _, _, hab_path in scenario_config[HABITAT_MAP_KEY]:
+    for _, _, hab_path in eval(scenario_config[HABITAT_MAP_KEY]).values():
         if not os.path.exists(hab_path):
             raise ValueError(
                 f'expected a habitat raster at "{hab_path}" but one not found')
 
-    return True
+    return scenario_config, scenario_id
 
 
 def main():
@@ -2262,21 +2267,17 @@ def main():
         help='Pattern to .INI file(s) that describes scenario(s) to run.')
     args = parser.parse_args()
 
-    config = configparser.ConfigParser(allow_no_value=True)
-    config.read('global_config.ini')
-    config_path_list = list(glob.glob(args.scenario_config_path))
-
+    scenario_config_path_list = list(glob.glob(args.scenario_config_path))
     task_graph = taskgraph.TaskGraph(
         WORKSPACE_DIR,
-        min(len(config_path_list), multiprocessing.cpu_count()), 5.0)
-
+        min(len(scenario_config_path_list), multiprocessing.cpu_count()), 5.0)
+    LOGGER.info(f'''parsing and validating {
+        len(scenario_config_path_list)} configuration files''')
     config_scenario_list = []
-    for config_path in config_path_list:
-        config.read(args.scenario_config_path)
-        scenario_id = os.path.basename(
-            os.path.splitext(args.scenario_config_path)[0])
-        _validate_ini(config, scenario_id)
-        config_scenario_list.append((config, scenario_id))
+    for scenario_config_path in scenario_config_path_list:
+        scenario_config, scenario_id = _process_scenario_ini(
+            scenario_config_path)
+        config_scenario_list.append((scenario_config, scenario_id))
 
     for config, scenario_id in config_scenario_list:
         habitat_map = eval(config[scenario_id]['habitat'])
