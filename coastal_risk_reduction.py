@@ -30,9 +30,6 @@ import shapely.wkt
 
 gdal.SetCacheMax(2**25)
 
-SHORE_POINT_SAMPLE_DISTANCE = 500.0
-
-
 WORKSPACE_DIR = 'global_cv_workspace'
 CHURN_DIR = os.path.join(WORKSPACE_DIR, 'cn')
 ECOSHARD_DIR = os.path.join(WORKSPACE_DIR, 'es')
@@ -50,8 +47,8 @@ M_PER_DEGREE = 111300.0
 ECOSHARD_BUCKET_URL = (
     'https://storage.googleapis.com/critical-natural-capital-ecoshards/'
     'cv_layers/')
-#some of the following datasets seem to be missing from that folder; they
-#can all be found here: gs://ecoshard-root/key_datasets/cv_layers
+# some of the following datasets seem to be missing from that folder; they
+# can all be found here: gs://ecoshard-root/key_datasets/cv_layers
 
 EMPTY_RASTER_URL = (
     ECOSHARD_BUCKET_URL + 'empty_md5_f8f71e20668060bda7567ca33149a45c.tif')
@@ -342,6 +339,7 @@ def cv_grid_worker(
         wwiii_vector_path,
         habitat_raster_path_map,
         grid_workspace_dir,
+        shore_point_sample_distance,
         ):
     """Worker process to calculate CV for a grid.
 
@@ -365,7 +363,8 @@ def cv_grid_worker(
             (raster path, risk, dist(m)) tuple. These are the raster versions
             of habitats to use in Rhab.
         grid_workspace_dir (str): path to workspace to use to handle grid
-
+        shore_point_sample_distance (float): straight line distance between
+            shore sample points.
     Returns:
         None.
 
@@ -384,8 +383,8 @@ def cv_grid_worker(
     wwiii_rtree = build_rtree(wwiii_vector_path)
 
     target_pixel_size = [
-        SHORE_POINT_SAMPLE_DISTANCE / 4,
-        -SHORE_POINT_SAMPLE_DISTANCE / 4]
+        shore_point_sample_distance / 4,
+        -shore_point_sample_distance / 4]
 
     while True:
         payload = bb_work_queue.get()
@@ -429,7 +428,7 @@ def cv_grid_worker(
                 workspace_dir, 'shore_points.gpkg')
             sample_line_to_points(
                 local_geomorphology_vector_path, shore_point_vector_path,
-                SHORE_POINT_SAMPLE_DISTANCE)
+                shore_point_sample_distance)
 
             local_landmass_vector_path = os.path.join(
                 workspace_dir, 'landmass.gpkg')
@@ -472,7 +471,9 @@ def cv_grid_worker(
 
             # wind and wave power
             calculate_wind_and_wave(
-                shore_point_vector_path, local_landmass_vector_path,
+                shore_point_vector_path,
+                shore_point_sample_distance,
+                local_landmass_vector_path,
                 landmass_boundary_vector_path,
                 local_dem_path, wwiii_rtree, 'rei', 'ew')
 
@@ -680,7 +681,8 @@ def calculate_surge(
 
 
 def calculate_wind_and_wave(
-        shore_point_vector_path, landmass_vector_path,
+        shore_point_vector_path,
+        shore_point_sample_distance, landmass_vector_path,
         landmass_boundary_vector_path, bathymetry_raster_path,
         wwiii_rtree, wind_fieldname, wave_fieldname):
     """Calculate wind exposure for given points.
@@ -688,6 +690,8 @@ def calculate_wind_and_wave(
     Parameters:
         shore_point_vector_path (str): path to a point vector, this value will
             be modified to hold the total wind exposure at this point.
+        shore_point_sample_distance (float): straight line distance between
+            shore sample points.
         landmass_vector_path (str): path to a vector indicating landmass that
             will block wind exposure.
         landmass_boundary_vector_path (str): path to a string vector containing
@@ -906,7 +910,7 @@ def calculate_wind_and_wave(
                     bytes(ray_geometry.ExportToWkb()))
                 while ray_step_loc < ray_shapely.length:
                     sample_point = ray_shapely.interpolate(ray_step_loc)
-                    ray_step_loc += SHORE_POINT_SAMPLE_DISTANCE/4
+                    ray_step_loc += shore_point_sample_distance/4
                     pixel_x, pixel_y = [int(x) for x in gdal.ApplyGeoTransform(
                         bathy_inv_gt,
                         sample_point.coords[0][0], sample_point.coords[0][1])]
@@ -1241,7 +1245,6 @@ def clip_geometry(
         if error_code:
             LOGGER.warning(f'error code {error_code} encountered on {geom}')
             continue
-            #raise RuntimeError(error_code)
         feature = ogr.Feature(layer_defn)
         feature.SetGeometry(clipped_geom.Clone())
         for field_name, _ in global_geom_strtree.field_name_type_list:
@@ -1465,7 +1468,8 @@ def clip_and_reproject_raster(
         try:
             base_srs.ImportFromWkt(base_raster_info['projection_wkt'])
         except Exception as e:
-            LOGGER.exception(f'error on {base_raster_path}\n{base_raster_info}')
+            LOGGER.exception(
+                f'error on {base_raster_path}\n{base_raster_info}')
             raise e
         target_srs = osr.SpatialReference()
         target_srs.ImportFromWkt(target_srs_wkt)
@@ -1799,12 +1803,6 @@ def merge_cv_points(cv_vector_queue, target_cv_vector_path):
         'seagrass',
         ]
 
-    if BARRIER_REEFS:
-        fields_to_copy.extend([
-            'mesoamerican_barrier_reef', 'new_caledonian_barrier_reef',
-            'great_barrier_reef', 'keys_barrier_reef',
-            ])
-
     for field_id in fields_to_copy:
         target_cv_layer.CreateField(ogr.FieldDefn(field_id, ogr.OFTReal))
     target_cv_layer_defn = target_cv_layer.GetLayerDefn()
@@ -1957,7 +1955,8 @@ def add_cv_vector_risk(cv_risk_vector_path):
                 'Rgeomorphology', 'Rsurge', 'Rwave', 'Rwind', 'Rslr',
                 'Rrelief']:
             nohab_exposure_index *= feature.GetField(risk_field)
-        # the *4.8 is to get the "missing" habitat risk in there (4.8 comes from equation 15)
+        # the *4.8 is to get the "missing" habitat risk in there
+        # (4.8 comes from equation 15)
         nohab_exposure_index = (nohab_exposure_index * 4.8)**(1./7.)
         feature.SetField('Rt_nohab_all', nohab_exposure_index)
 
@@ -2110,7 +2109,9 @@ def calculate_habitat_value(
                 'GTIFF', (
                     'TILED=YES', 'BIGTIFF=YES', 'COMPRESS=LZW',
                     'BLOCKXSIZE=256', 'BLOCKYSIZE=256',)))
-        LOGGER.info(f'rasterizing {buffer_habitat_path} onto {value_coverage_raster_path} with attribute id {habitat_service_id}')
+        LOGGER.info(f'''rasterizing {buffer_habitat_path} onto {
+            value_coverage_raster_path} with attribute id {
+            habitat_service_id}''')
         geoprocessing.rasterize(
             buffer_habitat_path, value_coverage_raster_path,
             option_list=[
@@ -2386,7 +2387,8 @@ def preprocess_habitat(churn_subdirectory):
 
 
 def calculate_degree_cell_cv(
-        local_data_path_map, habitat_raster_risk_map, target_cv_vector_path,
+        local_data_path_map, habitat_raster_risk_map,
+        shore_point_sample_distance, target_cv_vector_path,
         local_workspace_dir):
     """Process all global degree grids to calculate local hab risk.
 
@@ -2396,6 +2398,8 @@ def calculate_degree_cell_cv(
         habitat_raster_risk_map (dict): maps habitat layers to raster masks,
             indexed by habitat id maps to tuple of
             (raster path, risk val, distance).
+        shore_point_sample_distance (float): straight line distance between
+            two sample points on the shore points.
         target_cv_vector_path (str): path to desiered point CV result.
         local_workspace_dir (str): directory to write local grid workspaces
 
@@ -2431,7 +2435,8 @@ def calculate_degree_cell_cv(
                 local_data_path_map['dem'],
                 local_data_path_map['global_wwiii_vector_path'],
                 habitat_raster_risk_map,
-                grid_workspace_dir
+                grid_workspace_dir,
+                shore_point_sample_distance,
                 ))
         cv_grid_worker_thread.start()
         cv_grid_worker_list.append(cv_grid_worker_thread)
@@ -2479,6 +2484,10 @@ def _validate_ini(ini_config, scenario_id):
 
     Returns true if correct validation otheriwse raises Exception.
     """
+    if scenario_id not in config:
+        raise ValueError(
+            f'expected a section called [{scenario_id}] in configuration file'
+            f'but was not found')
     scenario_config = config[scenario_id]
     missing_keys = []
     for key in config['expected_keys']:
@@ -2486,8 +2495,8 @@ def _validate_ini(ini_config, scenario_id):
             missing_keys.append(key)
     if missing_keys:
         raise ValueError(
-            f'expected the following keys in "{args.scenario_config_path}" but '
-            f'not found: "{", ".join(missing_keys)}"')
+            f'expected the following keys in "{args.scenario_config_path}" '
+            f'but not found: "{", ".join(missing_keys)}"')
     for key in scenario_config:
         LOGGER.debug(key)
         path = scenario_config[key]
@@ -2519,8 +2528,8 @@ if __name__ == '__main__':
     _validate_ini(config, scenario_id)
     sys.exit()
 
-    LOGGER.debug(eval(config['luzon']['LULC_CODE_TO_HAB_MAP']))
-    LOGGER.debug(config['luzon']['DEM'])
+    LOGGER.debug(eval(config[scenario_id]['LULC_CODE_TO_HAB_MAP']))
+    LOGGER.debug(config[scenario_id]['DEM'])
 
     LOGGER.debug('parsing args')
 
@@ -2564,7 +2573,9 @@ if __name__ == '__main__':
             calculate_cv_vector_task = task_graph.add_task(
                 func=calculate_degree_cell_cv,
                 args=(
-                    local_data_path_map, habitat_raster_risk_dist_map,
+                    local_data_path_map,
+                    config[scenario_id]['shore_point_sample_distance'],
+                    habitat_raster_risk_dist_map,
                     target_cv_vector_path, local_workspace_dir),
                 target_path_list=[target_cv_vector_path],
                 task_name='calculate CV for %s' % landcover_basename)
@@ -2583,7 +2594,6 @@ if __name__ == '__main__':
                     local_habitat_value_dir, habitat_value_token_path),
                 dependent_task_list=[calculate_cv_vector_task],
                 target_path_list=[habitat_value_token_path],
-                #transient_run=True,
                 task_name=(
                     'calculate habitat value for %s' % landcover_basename))
     except Exception:
