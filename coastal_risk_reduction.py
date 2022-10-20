@@ -1,10 +1,10 @@
 """Global CV Analysis."""
+import glob
 import argparse
 import bisect
+import datetime
 import collections
 import configparser
-import datetime
-import gzip
 import hashlib
 import logging
 import math
@@ -13,14 +13,12 @@ import os
 import shutil
 import tempfile
 import threading
-import sys
 
 from ecoshard import geoprocessing
 from ecoshard import taskgraph
 from osgeo import gdal
 from osgeo import ogr
 from osgeo import osr
-import ecoshard
 import numpy
 import retrying
 import rtree
@@ -33,159 +31,16 @@ gdal.SetCacheMax(2**25)
 WORKSPACE_DIR = 'global_cv_workspace'
 CHURN_DIR = os.path.join(WORKSPACE_DIR, 'cn')
 ECOSHARD_DIR = os.path.join(WORKSPACE_DIR, 'es')
+
+HABITAT_MAP_KEY = 'HABITAT_MAP'  # key in ini file with hab risk/dist/path map
+
+for dir_path in [WORKSPACE_DIR, CHURN_DIR]:
+    os.makedirs(dir_path, exist_ok=True)
+
 TARGET_NODATA = -1
 TARGET_CV_VECTOR_PATH = os.path.join(
-    WORKSPACE_DIR, 'global_cv_analysis_result.gpkg')
-
-# [minx, miny, maxx, maxy].
-GLOBAL_AOI_WGS84_BB = [-179, -65, 180, 77]
-RELIEF_SAMPLE_DISTANCE = 5000.0
-N_FETCH_RAYS = 16  # this is hardcoded because of WWIII fields
-MAX_FETCH_DISTANCE = 60000
-M_PER_DEGREE = 111300.0
-
-ECOSHARD_BUCKET_URL = (
-    'https://storage.googleapis.com/critical-natural-capital-ecoshards/'
-    'cv_layers/')
-# some of the following datasets seem to be missing from that folder; they
-# can all be found here: gs://ecoshard-root/key_datasets/cv_layers
-
-EMPTY_RASTER_URL = (
-    ECOSHARD_BUCKET_URL + 'empty_md5_f8f71e20668060bda7567ca33149a45c.tif')
-
-GLOBAL_POLYGON_URL = (
-    ECOSHARD_BUCKET_URL +
-    'ipbes-cv_global_polygon_simplified_geometries_'
-    'md5_653118dde775057e24de52542b01eaee.gpkg')
-
-BUFFER_VECTOR_URL = (
-    ECOSHARD_BUCKET_URL +
-    'buffered_global_shore_5km_md5_a68e1049c1c03673add014cd29b7b368.gpkg')
-SHORE_GRID_URL = (
-    ECOSHARD_BUCKET_URL +
-    'shore_grid_md5_07aea173cf373474c096f1d5e3463c2f.gpkg')
-
-GLOBAL_WWIII_GZ_URL = (
-    ECOSHARD_BUCKET_URL +
-    'wave_watch_iii_md5_c8bb1ce4739e0a27ee608303c217ab5b.gpkg.gz')
-GLOBAL_DEM_RASTER_URL = (
-    ECOSHARD_BUCKET_URL +
-    'global_dem_md5_22c5c09ac4c4c722c844ab331b34996c.tif')
-SLR_RASTER_URL = (
-    ECOSHARD_BUCKET_URL +
-    'MSL_Map_MERGED_Global_AVISO_NoGIA_Adjust_'
-    'md5_3072845759841d0b2523d00fe9518fee.tif')
-GLOBAL_GEOMORPHOLOGY_VECTOR_URL = (
-    ECOSHARD_BUCKET_URL +
-    'geomorphology_md5_e65eff55840e7a80cfcb11fdad2d02d7.gpkg')
-# The reefs raster is not in wgs84 but the script below projects it so
-GLOBAL_REEFS_RASTER_URL = (
-    ECOSHARD_BUCKET_URL +
-    'ipbes-cv_reef_wgs84_compressed_md5_96d95cc4f2c5348394eccff9e8b84e6b.tif')
-GLOBAL_MANGROVES_RASTER_URL = (
-    ECOSHARD_BUCKET_URL +
-    'ipbes-cv_mangrove_md5_0ec85cb51dab3c9ec3215783268111cc.tif')
-GLOBAL_SEAGRASS_RASTER_URL = (
-    ECOSHARD_BUCKET_URL +
-    'ipbes-cv_seagrass_md5_a9cc6d922d2e74a14f74b4107c94a0d6.tif')
-GLOBAL_SALTMARSH_RASTER_URL = (
-    ECOSHARD_BUCKET_URL +
-    'ipbes-cv_saltmarsh_md5_203d8600fd4b6df91f53f66f2a011bcd.tif')
-
-GLOBAL_DATA_URL_MAP = {
-    'geomorphology': GLOBAL_GEOMORPHOLOGY_VECTOR_URL,
-    'mangroves_forest': GLOBAL_MANGROVES_RASTER_URL,
-    'reefs': GLOBAL_REEFS_RASTER_URL,
-    'seagrass': GLOBAL_SEAGRASS_RASTER_URL,
-    'saltmarsh_wetland': GLOBAL_SALTMARSH_RASTER_URL,
-    'dem': GLOBAL_DEM_RASTER_URL,
-    'slr': SLR_RASTER_URL,
-    'landmass': GLOBAL_POLYGON_URL,
-    'shore_grid': SHORE_GRID_URL,
-    'global_wwiii_vector_path': GLOBAL_WWIII_GZ_URL,
-}
-
-
-HAB_FIELDS = [
-    '4_500',
-    '2_2000',
-    'mangroves_forest',
-    'saltmarsh_wetland',
-    'seagrass',
-    'reefs_all',
-]
-
-REEF_FIELDS = [
-    'reefs',
-]
-
-# this is used to evaluate habitat value
-FINAL_HAB_FIELDS = REEF_FIELDS + [
-    'mangroves_forest',
-    'saltmarsh_wetland',
-    'seagrass',
-    '4_500',
-    '2_2000',
-]
-
-
-SEDTYPE_TO_RISK = {
-    0: 5,  # unknown
-    1: 5,  # sandy
-    2: 1,  # unerodable
-    3: 5,  # muddy
-    4: 1,  # coral/mangrove
-}
-
-
-# This dictionary maps landcode id to (risk, dist) tuples
-LULC_CODE_TO_HAB_MAP = {
-    0: (0, None),
-    10: (0, None),
-    11: (0, None),
-    12: (0, None),
-    20: (0, None),
-    30: (0, None),
-    40: (4, 500),
-    50: (1, 2000),
-    51: (1, 2000),
-    52: (2, 2000),
-    60: (1, 2000),
-    61: (1, 2000),
-    62: (2, 2000),
-    70: (1, 2000),
-    71: (1, 2000),
-    72: (2, 2000),
-    80: (1, 2000),
-    81: (1, 2000),
-    82: (2, 2000),
-    90: (1, 2000),
-    91: (1, 2000),
-    92: (2, 2000),
-    100: (1, 2000),
-    110: (2, 2000),
-    120: (2, 2000),
-    121: (2, 2000),
-    122: (2, 2000),
-    130: (2, 2000),
-    140: (2, 2000),
-    150: (4, 500),
-    151: (4, 500),
-    152: (4, 500),
-    153: (4, 500),
-    160: (1, 2000),
-    161: (1, 2000),
-    170: (1, 2000),
-    171: (1, 2000),
-    180: (2, 1000),
-    181: (2, 1000),
-    190: (0, None),
-    200: (0, None),
-    201: (0, None),
-    202: (0, None),
-    210: (0, None),
-    220: (0, None),
-    }
+    WORKSPACE_DIR, f'''global_cv_analysis_result_{
+        datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")}.gpkg''')
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -195,49 +50,6 @@ logging.basicConfig(
 LOGGER = logging.getLogger(__name__)
 
 STOP_SENTINEL = 'STOP'
-
-HABITAT_VECTOR_PATH_MAP = {
-    'reefs': (
-        os.path.join(
-            ECOSHARD_DIR, os.path.basename(GLOBAL_DATA_URL_MAP['reefs'])),
-        1, 2000.0),
-    'mangroves_forest': (
-        os.path.join(
-            ECOSHARD_DIR, os.path.basename(
-                GLOBAL_DATA_URL_MAP['mangroves_forest'])),
-        1, 2000.0),
-    'saltmarsh_wetland': (
-        os.path.join(
-            ECOSHARD_DIR, os.path.basename(
-                GLOBAL_DATA_URL_MAP['saltmarsh_wetland'])),
-        2, 1000.0),
-    'seagrass': (
-        os.path.join(
-            ECOSHARD_DIR, os.path.basename(GLOBAL_DATA_URL_MAP['seagrass'])),
-        4, 500.0),
-}
-
-
-def _parse_non_default_options(config, section):
-    return set([
-        x for x in config[section]
-        if x not in config._defaults])
-
-
-def download_and_ungzip(url, target_path, buffer_size=2**20):
-    """Download `url` to `target_dir` and touch `target_token_path`."""
-    gzipfile_path = os.path.join(
-        os.path.dirname(target_path), os.path.basename(url))
-    ecoshard.download_url(url, gzipfile_path)
-
-    with gzip.open(gzipfile_path, 'rb') as gzip_file:
-        with open(target_path, 'wb') as target_file:
-            while True:
-                content = gzip_file.read(buffer_size)
-                if content:
-                    target_file.write(content)
-                else:
-                    break
 
 
 def build_rtree(vector_path):
@@ -2155,77 +1967,6 @@ def intersect_raster_op(array_a, array_b, nodata_a, nodata_b):
     return result
 
 
-def download_data(**kwargs):
-    """Download all data necessary for analysis to run.
-
-    Parameters:
-        kwargs (dict): dictionary of key/url pairs of data to download that
-            will also be added to the result.
-
-    Returns:
-        dictionary mapping GLOBAL_DATA_URL_MAP keys to local paths for those
-        artifacts.
-
-    """
-    LOGGER.debug('downloading data')
-    task_graph = taskgraph.TaskGraph(CHURN_DIR, -1)
-
-    local_data_path_map = {}
-    for data_id, ecoshard_url in {**GLOBAL_DATA_URL_MAP, **kwargs}.items():
-        local_ecoshard_path = os.path.join(
-            ECOSHARD_DIR, os.path.basename(ecoshard_url))
-        _ = task_graph.add_task(
-            func=ecoshard.download_url,
-            args=(ecoshard_url, local_ecoshard_path),
-            target_path_list=[local_ecoshard_path],
-            task_name='download %s' % local_ecoshard_path)
-        local_data_path_map[data_id] = local_ecoshard_path
-
-    local_data_path_map['global_wwiii_vector_path'] = os.path.join(
-        ECOSHARD_DIR, os.path.basename(
-            os.path.splitext(GLOBAL_WWIII_GZ_URL)[0]))
-
-    _ = task_graph.add_task(
-        func=download_and_ungzip,
-        args=(
-            GLOBAL_WWIII_GZ_URL,
-            local_data_path_map['global_wwiii_vector_path']),
-        target_path_list=[local_data_path_map['global_wwiii_vector_path']],
-        task_name=(
-            'download %s' % local_data_path_map['global_wwiii_vector_path']))
-
-    local_data_path_map['shore_buffer_vector_path'] = os.path.join(
-        ECOSHARD_DIR, os.path.basename(BUFFER_VECTOR_URL))
-    _ = task_graph.add_task(
-        func=ecoshard.download_url,
-        args=(
-            BUFFER_VECTOR_URL,
-            local_data_path_map['shore_buffer_vector_path']),
-        target_path_list=[local_data_path_map['shore_buffer_vector_path']],
-        task_name='download global_vector')
-
-    reef_degree_pixel_size = [0.004, -0.004]
-    wgs84_srs = osr.SpatialReference()
-    wgs84_srs.ImportFromEPSG(4326)
-    projected_reef_raster_path = os.path.join(CHURN_DIR, 'wgs84_reefs.tif')
-    project_reef_task = task_graph.add_task(
-        func=geoprocessing.warp_raster,
-        args=(
-            local_data_path_map['reefs'], reef_degree_pixel_size,
-            projected_reef_raster_path, 'near'),
-        kwargs={'target_projection_wkt': wgs84_srs.ExportToWkt()},
-        target_path_list=[projected_reef_raster_path],
-        task_name='project reefs to wgs84')
-    project_reef_task.join()
-    local_data_path_map['reefs'] = projected_reef_raster_path
-
-    task_graph.join()
-    task_graph.close()
-    del task_graph
-    LOGGER.debug('done downloading data')
-    return local_data_path_map
-
-
 def align_raster_list(raster_path_list, target_directory):
     """Aligns all the raster paths.
 
@@ -2482,15 +2223,15 @@ def _validate_ini(ini_config, scenario_id):
 
         scenario_id (str): expected section in `ini_config`.
 
-    Returns true if correct validation otheriwse raises Exception.
+    Returns True if correct validation otheriwse raises Exception.
     """
-    if scenario_id not in config:
+    if scenario_id not in ini_config:
         raise ValueError(
             f'expected a section called [{scenario_id}] in configuration file'
             f'but was not found')
-    scenario_config = config[scenario_id]
+    scenario_config = ini_config[scenario_id]
     missing_keys = []
-    for key in config['expected_keys']:
+    for key in ini_config['expected_keys']:
         if key not in scenario_config:
             missing_keys.append(key)
     if missing_keys:
@@ -2504,101 +2245,103 @@ def _validate_ini(ini_config, scenario_id):
             raise ValueError(
                 f'expected a file from "{key}" at "{scenario_config[key]}" '
                 f'but file not found')
-        else:
-            LOGGER.debug(path)
+
+    for _, _, hab_path in scenario_config[HABITAT_MAP_KEY]:
+        if not os.path.exists(hab_path):
+            raise ValueError(
+                f'expected a habitat raster at "{hab_path}" but one not found')
+
+    return True
 
 
-if __name__ == '__main__':
+def main():
     LOGGER.debug('starting')
     parser = argparse.ArgumentParser(description='Global CV analysis')
     parser.add_argument(
         'scenario_config_path',
-        help='Path to .INI file that describes scenario to run.')
-    parser.add_argument(
-        '--dasgupta_mode', action='store_true',
-        help='Ignore offshore mangrove and saltmarsh')
+        help='Pattern to .INI file(s) that describes scenario(s) to run.')
     args = parser.parse_args()
 
     config = configparser.ConfigParser(allow_no_value=True)
-
     config.read('global_config.ini')
-    config.read(args.scenario_config_path)
-    scenario_id = os.path.basename(
-        os.path.splitext(args.scenario_config_path)[0])
-    _validate_ini(config, scenario_id)
-    sys.exit()
+    config_path_list = list(glob.glob(args.scenario_config_path))
 
-    LOGGER.debug(eval(config[scenario_id]['LULC_CODE_TO_HAB_MAP']))
-    LOGGER.debug(config[scenario_id]['DEM'])
+    task_graph = taskgraph.TaskGraph(
+        WORKSPACE_DIR,
+        min(len(config_path_list), multiprocessing.cpu_count()), 5.0)
 
-    LOGGER.debug('parsing args')
+    config_scenario_list = []
+    for config_path in config_path_list:
+        config.read(args.scenario_config_path)
+        scenario_id = os.path.basename(
+            os.path.splitext(args.scenario_config_path)[0])
+        _validate_ini(config, scenario_id)
+        config_scenario_list.append((config, scenario_id))
 
-    for dir_path in [
-            WORKSPACE_DIR, CHURN_DIR, ECOSHARD_DIR]:
-        try:
-            os.makedirs(dir_path)
-        except OSError:
-            pass
+    for config, scenario_id in config_scenario_list:
+        habitat_map = eval(config[scenario_id]['habitat'])
+        local_data_path_map = {
+            'wwiii': config[scenario_id]['WWIII_PATH'],
+            'slr': config[scenario_id]['SLR_PATH'],
+            'geomorphology': config[scenario_id]['GEOMORPHOLOGY_PATH'],
+            'reefs': config[scenario_id]['REEFS_PATH'],
+            'mangroves': config[scenario_id]['MANGROVES_PATH'],
+            'seagrass': config[scenario_id]['SEAGRASS_PATH'],
+            'saltmarsh': config[scenario_id]['SALTMARSH_PATH'],
+            'dem': config[scenario_id]['DEM_PATH'],
+            'lulc': config[scenario_id]['LULC_PATH'],
+            'global_polygon': config[scenario_id]['GLOBAL_POLYGON_PATH'],
+            'buffer_vector': config[scenario_id]['BUFFER_VECTOR_PATH'],
+            'shore_grid': config[scenario_id]['SHORE_GRID_PATH'],
+        }
+        return
+        landcover_basename = os.path.splitext(
+            os.path.basename(landcover_url))[0]
+        hash_obj = hashlib.sha256()
+        hash_obj.update(landcover_basename.encode('utf-8'))
+        landcover_hash = hash_obj.hexdigest()[0:3]
+        local_workspace_dir = os.path.join(WORKSPACE_DIR, landcover_hash)
+        with open('hashtrans.txt', 'a') as hash_file:
+            hash_file.write(f'{landcover_basename} -> {landcover_hash}\n')
+        local_habitat_value_dir = os.path.join(
+            WORKSPACE_DIR, landcover_hash, 'value_rasters')
+        for dir_path in [local_workspace_dir, local_habitat_value_dir]:
+            os.makedirs(dir_path, exist_ok=True)
+        target_cv_vector_path = os.path.join(
+            local_workspace_dir, '%s.gpkg' % landcover_basename)
+        habitat_raster_risk_dist_map = preprocess_habitat(landcover_hash)
 
-    if args.dasgupta_mode:
-        GLOBAL_MANGROVES_RASTER_URL = EMPTY_RASTER_URL
-        GLOBAL_SALTMARSH_RASTER_URL = EMPTY_RASTER_URL
+        calculate_cv_vector_task = task_graph.add_task(
+            func=calculate_degree_cell_cv,
+            args=(
+                local_data_path_map,
+                config[scenario_id]['shore_point_sample_distance'],
+                habitat_raster_risk_dist_map,
+                target_cv_vector_path, local_workspace_dir),
+            target_path_list=[target_cv_vector_path],
+            task_name='calculate CV for %s' % landcover_basename)
 
-    try:
-        with open(args.landcover_list_file, 'r') as landcover_raster_file:
-            landcover_url_list = landcover_raster_file.read().splitlines()
-        task_graph = taskgraph.TaskGraph(
-            WORKSPACE_DIR,
-            min(len(landcover_url_list), multiprocessing.cpu_count()), 5.0)
-        for landcover_url in landcover_url_list:
-            if landcover_url.startswith('#'):
-                continue
-            local_data_path_map = download_data(lulc=landcover_url)
-            landcover_basename = os.path.splitext(
-                os.path.basename(landcover_url))[0]
-            hash_obj = hashlib.sha256()
-            hash_obj.update(landcover_basename.encode('utf-8'))
-            landcover_hash = hash_obj.hexdigest()[0:3]
-            local_workspace_dir = os.path.join(WORKSPACE_DIR, landcover_hash)
-            with open('hashtrans.txt', 'a') as hash_file:
-                hash_file.write(f'{landcover_basename} -> {landcover_hash}\n')
-            local_habitat_value_dir = os.path.join(
-                WORKSPACE_DIR, landcover_hash, 'value_rasters')
-            for dir_path in [local_workspace_dir, local_habitat_value_dir]:
-                os.makedirs(dir_path, exist_ok=True)
-            target_cv_vector_path = os.path.join(
-                local_workspace_dir, '%s.gpkg' % landcover_basename)
-            habitat_raster_risk_dist_map = preprocess_habitat(landcover_hash)
+        local_lulc_raster_path = os.path.join(
+            ECOSHARD_DIR, os.path.basename(landcover_url))
+        LOGGER.info('starting hab value calc')
 
-            calculate_cv_vector_task = task_graph.add_task(
-                func=calculate_degree_cell_cv,
-                args=(
-                    local_data_path_map,
-                    config[scenario_id]['shore_point_sample_distance'],
-                    habitat_raster_risk_dist_map,
-                    target_cv_vector_path, local_workspace_dir),
-                target_path_list=[target_cv_vector_path],
-                task_name='calculate CV for %s' % landcover_basename)
-
-            local_lulc_raster_path = os.path.join(
-                ECOSHARD_DIR, os.path.basename(landcover_url))
-            LOGGER.info('starting hab value calc')
-
-            habitat_value_token_path = os.path.join(
-                local_habitat_value_dir, 'hab_value.TOKEN')
-            task_graph.add_task(
-                func=calculate_habitat_value,
-                args=(
-                    target_cv_vector_path, local_lulc_raster_path,
-                    FINAL_HAB_FIELDS, habitat_raster_risk_dist_map,
-                    local_habitat_value_dir, habitat_value_token_path),
-                dependent_task_list=[calculate_cv_vector_task],
-                target_path_list=[habitat_value_token_path],
-                task_name=(
-                    'calculate habitat value for %s' % landcover_basename))
-    except Exception:
-        LOGGER.exception('error in main')
+        habitat_value_token_path = os.path.join(
+            local_habitat_value_dir, 'hab_value.TOKEN')
+        task_graph.add_task(
+            func=calculate_habitat_value,
+            args=(
+                target_cv_vector_path, local_lulc_raster_path,
+                FINAL_HAB_FIELDS, habitat_raster_risk_dist_map,
+                local_habitat_value_dir, habitat_value_token_path),
+            dependent_task_list=[calculate_cv_vector_task],
+            target_path_list=[habitat_value_token_path],
+            task_name=(
+                'calculate habitat value for %s' % landcover_basename))
 
     task_graph.join()
     task_graph.close()
-    LOGGER.info('completed successfully')
+    LOGGER.info(f'completed successfully, result in {TARGET_CV_VECTOR_PATH}')
+
+
+if __name__ == '__main__':
+    main()
