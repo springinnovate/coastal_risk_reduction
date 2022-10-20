@@ -33,7 +33,10 @@ CHURN_DIR = os.path.join(WORKSPACE_DIR, 'cn')
 ECOSHARD_DIR = os.path.join(WORKSPACE_DIR, 'es')
 GLOBAL_INI_PATH = 'global_config.ini'
 
-HABITAT_MAP_KEY = 'HABITAT_MAP'  # key in ini file with hab risk/dist/path map
+# These are globally defined keys expected in global_config.ini
+HABITAT_MAP_KEY = 'habitat_map'
+SHORE_POINT_SAMPLE_DISTANCE_KEY = 'shore_point_sample_distance'
+LULC_CODE_TO_HAB_MAP_KEY = 'lulc_code_to_hab_map'
 
 for dir_path in [WORKSPACE_DIR, CHURN_DIR]:
     os.makedirs(dir_path, exist_ok=True)
@@ -2007,11 +2010,13 @@ def align_raster_list(raster_path_list, target_directory):
     return aligned_path_list
 
 
-def preprocess_habitat(churn_subdirectory):
+def preprocess_habitat(churn_subdirectory, scenario_config):
     """Merge and filter all the habitat layers.
 
     Args:
         churn_subdirectory (str): subdir to put results into
+        scenario_config (ConfigParser object): configuration file for
+            given scenario
 
     Returns:
         dictionary of habitat id to (raster path, risk, dist) tuples.
@@ -2019,33 +2024,30 @@ def preprocess_habitat(churn_subdirectory):
     """
     task_graph = taskgraph.TaskGraph(CHURN_DIR, -1)
     hab_churn_dir = os.path.join(CHURN_DIR, churn_subdirectory)
-    lulc_shore_mask_raster_path = os.path.join(
-        hab_churn_dir, 'lulc_masked_by_shore.tif')
-    mask_lulc_by_shore_task = task_graph.add_task(
-        func=geoprocessing.mask_raster,
-        args=(
-            (local_data_path_map['lulc'], 1),
-            local_data_path_map['shore_buffer_vector_path'],
-            lulc_shore_mask_raster_path),
-        target_path_list=[lulc_shore_mask_raster_path],
-        # ignore filetime stamp modification by a read-only open
-        ignore_path_list=[
-            local_data_path_map['shore_buffer_vector_path']],
-        task_name='mask shore')
 
     # each value in `risk_distance_to_lulc_code` can be lumped into one
     # type.
     risk_distance_to_lulc_code = collections.defaultdict(list)
-    for lulc_code, risk_distance in LULC_CODE_TO_HAB_MAP.items():
+    lulc_code_to_hab_map = eval(scenario_config[LULC_CODE_TO_HAB_MAP_KEY])
+    for lulc_code, risk_distance in lulc_code_to_hab_map.items():
         risk_distance_to_lulc_code[risk_distance].append(lulc_code)
 
     # this maps all the same type of codes together
-    habitat_raster_risk_map = dict(HABITAT_VECTOR_PATH_MAP)
-    for risk_distance_tuple, lulc_code_list in sorted(
-            risk_distance_to_lulc_code.items()):
+    risk_distance_set = set()
+    for lulc_code, risk_distance_tuple in lulc_code_to_hab_map.items():
         if risk_distance_tuple[0] == 0:
             LOGGER.info('skipping hab tuple %s', str(risk_distance_tuple))
             continue
+        risk_distance_set.add(risk_distance_tuple)
+
+    for risk_distance_tuple in risk_distance_set:
+        matching_lulc_code_list = [
+            lucode for lucode, local_risk_tuple in lulc_code_to_hab_map.items()
+            if local_risk_tuple == risk_distance_tuple]
+        LOGGER.debug(f'{risk_distance_tuple}  -> {matching_lulc_code_list}')
+        sys.exit()
+        # for lulc_code, risk_distance_tuple in scenario_config[
+        #     LULC_CODE_TO_HAB_MAP_KEY].items()]:
         # reclassify landcover map to be ones everywhere for `lulc_code_list`
         reclass_map = {}
         for lulc_code in LULC_CODE_TO_HAB_MAP:
@@ -2308,7 +2310,8 @@ def main():
             os.makedirs(dir_path, exist_ok=True)
         target_cv_vector_path = os.path.join(
             local_workspace_dir, '%s.gpkg' % scenario_id)
-        habitat_raster_risk_dist_map = preprocess_habitat(landcover_hash)
+        habitat_raster_risk_dist_map = preprocess_habitat(
+            landcover_hash, scenario_config)
 
         return
 
@@ -2316,7 +2319,7 @@ def main():
             func=calculate_degree_cell_cv,
             args=(
                 local_data_path_map,
-                config[scenario_id]['shore_point_sample_distance'],
+                scenario_id['shore_point_sample_distance'],
                 habitat_raster_risk_dist_map,
                 target_cv_vector_path, local_workspace_dir),
             target_path_list=[target_cv_vector_path],
