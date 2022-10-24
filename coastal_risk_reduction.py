@@ -152,7 +152,10 @@ def cv_grid_worker(
         geomorphology_vector_path,
         slr_raster_path,
         global_dem_raster_path,
+        relief_sample_distance,
         wwiii_vector_path,
+        lulc_raster_path,
+        lucode_to_hab_map,
         habitat_raster_path_map,
         grid_workspace_dir,
         shore_point_sample_distance,
@@ -171,10 +174,16 @@ def cv_grid_worker(
         geomorphology_vector_path (str): path to line geometry geomorphology
             layer that has a field called 'SEDTYPE'
         global_dem_raster_path (str): path to a global dem/bathymetry raster.
+        relief_sample_distance (float): distance to sample relief out from
+            shore.
         slr_raster_path (str): path to a sea level rise raster.
         wwiii_vector_path (str): path to wave watch III dataset that has
             fields REI_PCT[degree] and REI_V[degree] for degrees 0-360 in 22.5
             degree increments.
+        lulc_raster_path (str): path to landcover raster that's used to define
+            local landcover habitats
+        lucode_to_hab_map (dict): map of lucode to (risk, dist) tuple for
+            creating custom habitat masks
         habitat_raster_path_map (dict): map a habitat id to a
             (raster path, risk, dist(m)) tuple. These are the raster versions
             of habitats to use in Rhab.
@@ -185,8 +194,6 @@ def cv_grid_worker(
         None.
 
     """
-    # TODO: make all the preprocessing happen right here rather than globally
-
     LOGGER.info('build geomorphology rtree')
     geomorphology_strtree = build_strtree(geomorphology_vector_path)
     geomorphology_proj_wkt = geoprocessing.get_vector_info(
@@ -204,42 +211,52 @@ def cv_grid_worker(
         shore_point_sample_distance / 4,
         -shore_point_sample_distance / 4]
 
+    # map a set of (risk, dist) tuples to lists of landcover codes that
+    # match them
+    risk_distance_lucode_map = collections.defaultdict(list)
+    for lucode, risk_dist_tuple in lucode_to_hab_map.items():
+        risk_distance_lucode_map[risk_dist_tuple].append(lucode)
+
+    risk_dist_raster_map = collections.defaultdict(list)
+    for risk_dist_path_tuple in habitat_raster_path_map.values():
+        risk_dist_raster_map[
+            (risk_dist_path_tuple[0], risk_dist_path_tuple[1])].append(
+                risk_dist_path_tuple[2])
+
     while True:
-        payload = bb_work_queue.get()
-        if payload == STOP_SENTINEL:
-            LOGGER.debug('stopping')
-            # put it back so others can stop
-            bb_work_queue.put(STOP_SENTINEL)
-            break
-        else:
-            LOGGER.debug('running')
-        # otherwise payload is the bounding box
-        index, (lng_min, lat_min, lng_max, lat_max) = payload
-        bounding_box_list = [lng_min, lat_min, lng_max, lat_max]
-        buffered_bounding_box_list = [
-            lng_min-0.1, lat_min-0.1, lng_max+0.1, lat_max+0.1]
-        # create workspace
-        workspace_dir = os.path.join(
-            grid_workspace_dir, '%d_%s_%s_%s_%s' % (
-                index, lng_min, lat_min, lng_max, lat_max))
-        os.makedirs(workspace_dir, exist_ok=True)
-
-        # calculate (risk, dist) -> raster mask tuples given lulc map
-        # and a lookup of lulc to risk tuples
-        risk_to_raster_mask_map = clip_and_mask_habitat(
-            risk_distance_lucode_map, lulc_raster_path,
-            buffered_bounding_box_list,
-            target_projection_wkt, target_pixel_size, workspace_dir)
-
-        # task_graph = taskgraph.TaskGraph(workspace_dir, -1)
-
-        utm_srs = calculate_utm_srs((lng_min+lng_max)/2, (lat_min+lat_max)/2)
-        wgs84_srs = osr.SpatialReference()
-        wgs84_srs.ImportFromEPSG(4326)
-
-        # TODO: do all the clipping of the habitat rasters
-
         try:
+            payload = bb_work_queue.get()
+            if payload == STOP_SENTINEL:
+                LOGGER.debug('stopping')
+                # put it back so others can stop
+                bb_work_queue.put(STOP_SENTINEL)
+                break
+            else:
+                LOGGER.debug('running')
+            # otherwise payload is the bounding box
+            index, (lng_min, lat_min, lng_max, lat_max) = payload
+            bounding_box_list = [lng_min, lat_min, lng_max, lat_max]
+            buffered_bounding_box_list = [
+                lng_min-0.1, lat_min-0.1, lng_max+0.1, lat_max+0.1]
+            # create workspace
+            workspace_dir = os.path.join(
+                grid_workspace_dir, '%d_%s_%s_%s_%s' % (
+                    index, lng_min, lat_min, lng_max, lat_max))
+            os.makedirs(workspace_dir, exist_ok=True)
+
+            utm_srs = calculate_utm_srs((lng_min+lng_max)/2, (lat_min+lat_max)/2)
+            wgs84_srs = osr.SpatialReference()
+            wgs84_srs.ImportFromEPSG(4326)
+
+            # calculate (risk, dist) -> raster mask tuples given lulc map
+            # and a lookup of lulc to risk tuples
+            habitat_raster_path_map = clip_and_mask_habitat(
+                risk_distance_lucode_map, lulc_raster_path,
+                risk_dist_raster_map, buffered_bounding_box_list,
+                utm_srs.ExportToWkt(), target_pixel_size, workspace_dir)
+
+            habitat_raster_path_map
+
             local_geomorphology_vector_path = os.path.join(
                 workspace_dir, 'geomorphology.gpkg')
             clip_geometry(
@@ -269,7 +286,7 @@ def cv_grid_worker(
                 workspace_dir, 'dem.tif')
             clip_and_reproject_raster(
                 global_dem_raster_path, local_dem_path, utm_srs.ExportToWkt(),
-                bounding_box_list, RELIEF_SAMPLE_DISTANCE, 'bilinear', True,
+                bounding_box_list, relief_sample_distance, 'bilinear', True,
                 target_pixel_size)
 
             local_slr_path = os.path.join(
@@ -2018,19 +2035,21 @@ def align_raster_list(raster_path_list, target_directory):
 
 
 def clip_and_mask_habitat(
-        risk_distance_lucode_map, lulc_raster_path, target_bb,
-        target_projection_wkt, target_pixel_size, workspace_dir):
+        risk_dist_lucode_map, lulc_raster_path, risk_dist_raster_map,
+        target_bb, target_projection_wkt, target_pixel_size, workspace_dir):
     """Extract out lulc rasters given lulc code and risk/distance mappings.
 
     This function is used when a worker is given a local bounding box to
     to process for CV.
 
     Args:
-        risk_distance_lucode_map (dict): dictionary that maps (risk, dist)
-            tuples to a list of landcover codes tghat match
+        risk_dist_lucode_map (dict): dictionary that maps (risk, dist)
+            tuples to a list of landcover codes that match
             ``lulc_raster_path``.
         lulc_raster_path (str): path to landcover raster with codes that are
-            in the lists of ``risk_distance_lucode_map``.
+            in the lists of ``risk_dist_lucode_map``.
+        risk_dist_raster_map (dict): mapping of (risk, dist) tuples to raster
+            binary masks indicating where those risks are
         target_bb (list): this is the desired target bounding box in the
             same coordinate system as ``target_projection_wkt``.
         target_projection_wkt (str): desired target projection system
@@ -2042,7 +2061,7 @@ def clip_and_mask_habitat(
         dict mapping (risk, dist) tuples to clipped local paths of rasters
             which are 1 where the original lulc matches the input lulc.
     """
-    # First process the LULC raster into len(risk_distance_lucode_map) risk
+    # First process the LULC raster into len(risk_dist_lucode_map) risk
     # masks
     local_lulc_path = os.path.join(
         workspace_dir, f'''{os.path.basename(os.path.splitext(
@@ -2055,7 +2074,7 @@ def clip_and_mask_habitat(
 
     reclassify_threads = []
     habitat_raster_risk_map = {}
-    for risk_distance_tuple, risk_lucodes in risk_distance_lucode_map.items():
+    for risk_distance_tuple, risk_lucodes in risk_dist_lucode_map.items():
         reclass_map = {
             val: 1 for val in risk_lucodes
         }
@@ -2074,6 +2093,8 @@ def clip_and_mask_habitat(
 
     for reclassify_thread in reclassify_threads:
         reclassify_thread.join()
+
+
 
     return habitat_raster_risk_map
 
