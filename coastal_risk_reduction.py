@@ -222,11 +222,14 @@ def cv_grid_worker(
         workspace_dir = os.path.join(
             grid_workspace_dir, '%d_%s_%s_%s_%s' % (
                 index, lng_min, lat_min, lng_max, lat_max))
+        os.makedirs(workspace_dir, exist_ok=True)
 
-        try:
-            os.makedirs(workspace_dir)
-        except OSError:
-            pass
+        # calculate (risk, dist) -> raster mask tuples given lulc map
+        # and a lookup of lulc to risk tuples
+        risk_to_raster_mask_map = clip_and_mask_habitat(
+            risk_distance_lucode_map, lulc_raster_path,
+            buffered_bounding_box_list,
+            target_projection_wkt, target_pixel_size, workspace_dir)
 
         # task_graph = taskgraph.TaskGraph(workspace_dir, -1)
 
@@ -2015,8 +2018,8 @@ def align_raster_list(raster_path_list, target_directory):
 
 
 def clip_and_mask_habitat(
-        risk_distance_set, lulc_raster_path, target_bb,
-        target_projection_wkt):
+        risk_distance_lucode_map, lulc_raster_path, target_bb,
+        target_projection_wkt, target_pixel_size, workspace_dir):
     """Extract out lulc rasters given lulc code and risk/distance mappings.
 
     This function is used when a worker is given a local bounding box to
@@ -2031,101 +2034,107 @@ def clip_and_mask_habitat(
         target_bb (list): this is the desired target bounding box in the
             same coordinate system as ``target_projection_wkt``.
         target_projection_wkt (str): desired target projection system
-        target_cell_size (float): desired target pixel size
+        target_pixel_size (tuple): desired target pixel size
+        workspace_dir (str): path to a directory that can be used to create
+            intermediate files for calculation
 
     Returns:
         dict mapping (risk, dist) tuples to clipped local paths of rasters
             which are 1 where the original lulc matches the input lulc.
     """
-    for risk_distance_tuple in risk_distance_set:
-        matching_lulc_code_list = [
-            lucode for lucode, local_risk_tuple in lulc_code_to_hab_map.items()
-            if local_risk_tuple == risk_distance_tuple]
-        LOGGER.debug(f'{risk_distance_tuple}  -> {matching_lulc_code_list}')
-        # for lulc_code, risk_distance_tuple in scenario_config[
-        #     LULC_CODE_TO_HAB_MAP_KEY].items()]:
-        # reclassify landcover map to be ones everywhere for `lulc_code_list`
-        reclass_map = {}
-        for lulc_code in lulc_code_to_hab_map:
-            if lulc_code in matching_lulc_code_list:
-                reclass_map[lulc_code] = 1
-            else:
-                reclass_map[lulc_code] = 0
+    # First process the LULC raster into len(risk_distance_lucode_map) risk
+    # masks
+    local_lulc_path = os.path.join(
+        workspace_dir, f'''{os.path.basename(os.path.splitext(
+            lulc_raster_path)[0])}_{target_bb}.tif''')
+    geoprocessing.warp_raster(
+        lulc_raster_path, target_pixel_size, local_lulc_path,
+        'mode', target_bb=target_bb,
+        target_projection_wkt=target_projection_wkt,
+        gdal_warp_options=None, working_dir=workspace_dir)
 
+    reclassify_threads = []
+    habitat_raster_risk_map = {}
+    for risk_distance_tuple, risk_lucodes in risk_distance_lucode_map.items():
+        reclass_map = {
+            val: 1 for val in risk_lucodes
+        }
         risk_distance_mask_path = os.path.join(
-            hab_churn_dir, '%s_%s_mask.tif' % risk_distance_tuple)
+            workspace_dir, '%s_%s_mask.tif' % risk_distance_tuple)
 
-        _ = task_graph.add_task(
-            func=geoprocessing.reclassify_raster,
+        reclassify_thread = threading.Thread(
+            target=geoprocessing.reclassify_raster,
             args=(
-                (lulc_shore_mask_raster_path, 1), reclass_map,
+                (local_lulc_path, 1), reclass_map,
                 risk_distance_mask_path, gdal.GDT_Byte, 0),
-            target_path_list=[risk_distance_mask_path],
-            dependent_task_list=[mask_lulc_by_shore_task],
-            task_name='map distance types %s' % str(risk_distance_tuple))
+            daemon=True)
+        reclassify_thread.start()
+        reclassify_threads.append(reclassify_thread)
+        habitat_raster_risk_map[risk_distance_tuple] = risk_distance_mask_path
 
-        sys.exit()
-        habitat_raster_risk_map[risk_distance_tuple] = (
-            risk_distance_mask_path, risk_distance_tuple[0],
-            risk_distance_tuple[1])
+    for reclassify_thread in reclassify_threads:
+        reclassify_thread.join()
 
-    for vector_name, lucode_type_tuple in [
-            ('mangroves_forest', (1, 2000)),
-            ('saltmarsh_wetland', (2, 1000))]:
-        aligned_raster_path_list = [
-            os.path.join(hab_churn_dir, x) for x in [
-                '%s_a.tif' % vector_name, '%s_b.tif' % vector_name]]
-        habitat_raster_info = geoprocessing.get_raster_info(
-            habitat_raster_risk_map[lucode_type_tuple][0])
-        align_task = task_graph.add_task(
-            func=geoprocessing.align_and_resize_raster_stack,
-            args=(
-                [habitat_raster_risk_map[lucode_type_tuple][0],
-                 local_data_path_map[vector_name]],
-                aligned_raster_path_list, ['near', 'near'],
-                habitat_raster_info['pixel_size'], 'union'),
-            target_path_list=aligned_raster_path_list,
-            task_name='align %s' % vector_name)
-
-        merged_hab_raster_path = os.path.join(
-            hab_churn_dir, 'merged_%s.tif' % vector_name)
-        nodata_0 = geoprocessing.get_raster_info(
-            aligned_raster_path_list[0])['nodata'][0]
-        nodata_1 = geoprocessing.get_raster_info(
-            aligned_raster_path_list[1])['nodata'][0]
-        _ = task_graph.add_task(
-            func=geoprocessing.raster_calculator,
-            args=(
-                ((aligned_raster_path_list[0], 1),
-                 (aligned_raster_path_list[1], 1),
-                 (nodata_0, 'raw'),
-                 (nodata_1, 'raw'),
-                 (0, 'raw')), merge_masks_op,
-                merged_hab_raster_path, gdal.GDT_Int16, 0),
-            target_path_list=[merged_hab_raster_path],
-            dependent_task_list=[align_task],
-            task_name='merge %s masks' % vector_name)
-
-        del habitat_raster_risk_map[lucode_type_tuple]
-        habitat_raster_risk_map[vector_name] = (
-            merged_hab_raster_path, lucode_type_tuple[0],
-            lucode_type_tuple[1])
-
-    task_graph.join()
-    task_graph.close()
-    del task_graph
-    LOGGER.debug(habitat_raster_risk_map)
-
-    # convert tuple to strings for habitat risk so we can make fields for them
-    tuple_list = [
-        hab_index for hab_index in habitat_raster_risk_map
-        if isinstance(hab_index, tuple)]
-    for tuple_index in tuple_list:
-        str_index = '%s_%s' % tuple_index
-        habitat_raster_risk_map[str_index] = (
-            habitat_raster_risk_map[tuple_index])
-        del habitat_raster_risk_map[tuple_index]
     return habitat_raster_risk_map
+
+
+    # for vector_name, lucode_type_tuple in [
+    #         ('mangroves_forest', (1, 2000)),
+    #         ('saltmarsh_wetland', (2, 1000))]:
+    #     aligned_raster_path_list = [
+    #         os.path.join(hab_churn_dir, x) for x in [
+    #             '%s_a.tif' % vector_name, '%s_b.tif' % vector_name]]
+    #     habitat_raster_info = geoprocessing.get_raster_info(
+    #         habitat_raster_risk_map[lucode_type_tuple][0])
+    #     align_task = task_graph.add_task(
+    #         func=geoprocessing.align_and_resize_raster_stack,
+    #         args=(
+    #             [habitat_raster_risk_map[lucode_type_tuple][0],
+    #              local_data_path_map[vector_name]],
+    #             aligned_raster_path_list, ['near', 'near'],
+    #             habitat_raster_info['pixel_size'], 'union'),
+    #         target_path_list=aligned_raster_path_list,
+    #         task_name='align %s' % vector_name)
+
+    #     merged_hab_raster_path = os.path.join(
+    #         hab_churn_dir, 'merged_%s.tif' % vector_name)
+    #     nodata_0 = geoprocessing.get_raster_info(
+    #         aligned_raster_path_list[0])['nodata'][0]
+    #     nodata_1 = geoprocessing.get_raster_info(
+    #         aligned_raster_path_list[1])['nodata'][0]
+    #     _ = task_graph.add_task(
+    #         func=geoprocessing.raster_calculator,
+    #         args=(
+    #             ((aligned_raster_path_list[0], 1),
+    #              (aligned_raster_path_list[1], 1),
+    #              (nodata_0, 'raw'),
+    #              (nodata_1, 'raw'),
+    #              (0, 'raw')), merge_masks_op,
+    #             merged_hab_raster_path, gdal.GDT_Int16, 0),
+    #         target_path_list=[merged_hab_raster_path],
+    #         dependent_task_list=[align_task],
+    #         task_name='merge %s masks' % vector_name)
+
+    #     del habitat_raster_risk_map[lucode_type_tuple]
+    #     habitat_raster_risk_map[vector_name] = (
+    #         merged_hab_raster_path, lucode_type_tuple[0],
+    #         lucode_type_tuple[1])
+
+    # task_graph.join()
+    # task_graph.close()
+    # del task_graph
+    # LOGGER.debug(habitat_raster_risk_map)
+
+    # # convert tuple to strings for habitat risk so we can make fields for them
+    # tuple_list = [
+    #     hab_index for hab_index in habitat_raster_risk_map
+    #     if isinstance(hab_index, tuple)]
+    # for tuple_index in tuple_list:
+    #     str_index = '%s_%s' % tuple_index
+    #     habitat_raster_risk_map[str_index] = (
+    #         habitat_raster_risk_map[tuple_index])
+    #     del habitat_raster_risk_map[tuple_index]
+    # return habitat_raster_risk_map
 
 
 def preprocess_habitat(churn_subdirectory, scenario_config):
