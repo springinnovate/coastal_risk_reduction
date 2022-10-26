@@ -293,7 +293,7 @@ def cv_grid_worker(
             clip_and_reproject_raster(
                 local_data_path_map['dem_raster_path'], local_dem_path,
                 utm_srs.ExportToWkt(), bounding_box_list,
-                local_data_path_map['relief_sample_distance'],
+                float(local_data_path_map['relief_sample_distance']),
                 'bilinear', True, target_pixel_size)
 
             local_slr_path = os.path.join(
