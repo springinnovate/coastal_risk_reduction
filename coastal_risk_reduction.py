@@ -26,12 +26,16 @@ import shapely.geometry
 import shapely.strtree
 import shapely.wkt
 
-gdal.SetCacheMax(2**25)
+gdal.SetCacheMax(2**20)
+
 
 WORKSPACE_DIR = 'global_cv_workspace'
 CHURN_DIR = os.path.join(WORKSPACE_DIR, 'cn')
-ECOSHARD_DIR = os.path.join(WORKSPACE_DIR, 'es')
 GLOBAL_INI_PATH = 'global_config.ini'
+NOHAB_ID = 'nohab'
+
+for dir_path in [WORKSPACE_DIR, CHURN_DIR]:
+    os.makedirs(dir_path, exist_ok=True)
 
 # These are globally defined keys expected in global_config.ini
 HABITAT_MAP_KEY = 'habitat_map'
@@ -54,6 +58,21 @@ logging.basicConfig(
 LOGGER = logging.getLogger(__name__)
 
 STOP_SENTINEL = 'STOP'
+
+
+class ThreadWithReturnValue(threading.Thread):
+    def __init__(self, group=None, target=None, name=None,
+                 args=(), kwargs={}, daemon=None):
+        threading.Thread.__init__(
+            self, group=group, target=target, name=name, args=args,
+            kwargs=kwargs, daemon=daemon)
+        self._return = None
+    def run(self):
+        if self._target is not None:
+            self._return = self._target(*self._args, **self._kwargs)
+    def join(self, *args):
+        threading.Thread.join(self, *args)
+        return self._return
 
 
 def build_rtree(vector_path):
@@ -148,17 +167,8 @@ def build_strtree(vector_path):
 def cv_grid_worker(
         bb_work_queue,
         cv_point_complete_queue,
-        global_landmass_vector_path,
-        geomorphology_vector_path,
-        slr_raster_path,
-        global_dem_raster_path,
-        relief_sample_distance,
-        wwiii_vector_path,
-        lulc_raster_path,
-        lucode_to_hab_map,
-        habitat_raster_path_map,
+        local_data_path_map,
         grid_workspace_dir,
-        shore_point_sample_distance,
         ):
     """Worker process to calculate CV for a grid.
 
@@ -169,24 +179,8 @@ def cv_grid_worker(
         cv_point_complete_queue (multiprocessing.Queue): this queue is used to
             pass completed CV point vectors for further processing. It will be
             terminated by `STOP_SENTINEL`.
-        global_landmass_vector_path (str): path to global landmass vector. Used
-            for intersecting rays to determine shoreline exposure.
-        geomorphology_vector_path (str): path to line geometry geomorphology
-            layer that has a field called 'SEDTYPE'
-        global_dem_raster_path (str): path to a global dem/bathymetry raster.
-        relief_sample_distance (float): distance to sample relief out from
-            shore.
-        slr_raster_path (str): path to a sea level rise raster.
-        wwiii_vector_path (str): path to wave watch III dataset that has
-            fields REI_PCT[degree] and REI_V[degree] for degrees 0-360 in 22.5
-            degree increments.
-        lulc_raster_path (str): path to landcover raster that's used to define
-            local landcover habitats
-        lucode_to_hab_map (dict): map of lucode to (risk, dist) tuple for
-            creating custom habitat masks
-        habitat_raster_path_map (dict): map a habitat id to a
-            (raster path, risk, dist(m)) tuple. These are the raster versions
-            of habitats to use in Rhab.
+        local_data_path_map (dict): maps necessary habitat and biophysical
+            layers to actual files and data.
         grid_workspace_dir (str): path to workspace to use to handle grid
         shore_point_sample_distance (float): straight line distance between
             shore sample points.
@@ -194,29 +188,43 @@ def cv_grid_worker(
         None.
 
     """
-    LOGGER.info('build geomorphology rtree')
-    geomorphology_strtree = build_strtree(geomorphology_vector_path)
+    LOGGER.info('build geomorphology, landmass, and wwiii lookup')
+    geomorphology_strtree_thread = ThreadWithReturnValue(
+        target=build_strtree,
+        args=(local_data_path_map['geomorphology_vector_path'],))
+    landmass_strtree_thread = ThreadWithReturnValue(
+        target=build_strtree,
+        args=(local_data_path_map['landmass_vector_path'],))
+    wwiii_rtree_thread = ThreadWithReturnValue(
+        target=build_rtree,
+        args=(local_data_path_map['wwiii_vector_path'],))
+
+    geomorphology_strtree_thread.start()
+    landmass_strtree_thread.start()
+    wwiii_rtree_thread.start()
+
+    geomorphology_strtree = geomorphology_strtree_thread.join()
+    landmass_strtree = landmass_strtree_thread.join()
+    wwiii_rtree = wwiii_rtree_thread.join()
+
     geomorphology_proj_wkt = geoprocessing.get_vector_info(
-        geomorphology_vector_path)['projection_wkt']
+        local_data_path_map['geomorphology_vector_path'])['projection_wkt']
     gegeomorphology_proj = osr.SpatialReference()
     gegeomorphology_proj.ImportFromWkt(geomorphology_proj_wkt)
 
-    LOGGER.info('build landmass rtree')
-    landmass_strtree = build_strtree(global_landmass_vector_path)
-
-    LOGGER.info('build wwiii rtree')
-    wwiii_rtree = build_rtree(wwiii_vector_path)
-
+    shore_point_sample_distance = float(local_data_path_map[
+        'shore_point_sample_distance'])
     target_pixel_size = [
-        shore_point_sample_distance / 4,
-        -shore_point_sample_distance / 4]
+        shore_point_sample_distance / 4, -shore_point_sample_distance / 4]
 
     # map a set of (risk, dist) tuples to lists of landcover codes that
     # match them
+    lucode_to_hab_map = eval(local_data_path_map['lulc_code_to_hab_map'])
     risk_distance_lucode_map = collections.defaultdict(list)
     for lucode, risk_dist_tuple in lucode_to_hab_map.items():
         risk_distance_lucode_map[risk_dist_tuple].append(lucode)
 
+    habitat_raster_path_map = eval(local_data_path_map['habitat_map'])
     risk_dist_raster_map = collections.defaultdict(list)
     for risk_dist_path_tuple in habitat_raster_path_map.values():
         risk_dist_raster_map[
@@ -251,11 +259,9 @@ def cv_grid_worker(
             # calculate (risk, dist) -> raster mask tuples given lulc map
             # and a lookup of lulc to risk tuples
             habitat_raster_path_map = clip_and_mask_habitat(
-                risk_distance_lucode_map, lulc_raster_path,
+                risk_distance_lucode_map, local_data_path_map['lulc_raster_path'],
                 risk_dist_raster_map, buffered_bounding_box_list,
                 utm_srs.ExportToWkt(), target_pixel_size, workspace_dir)
-
-            habitat_raster_path_map
 
             local_geomorphology_vector_path = os.path.join(
                 workspace_dir, 'geomorphology.gpkg')
@@ -285,15 +291,16 @@ def cv_grid_worker(
             local_dem_path = os.path.join(
                 workspace_dir, 'dem.tif')
             clip_and_reproject_raster(
-                global_dem_raster_path, local_dem_path, utm_srs.ExportToWkt(),
-                bounding_box_list, relief_sample_distance, 'bilinear', True,
-                target_pixel_size)
+                local_data_path_map['dem_raster_path'], local_dem_path,
+                utm_srs.ExportToWkt(), bounding_box_list,
+                local_data_path_map['relief_sample_distance'],
+                'bilinear', True, target_pixel_size)
 
             local_slr_path = os.path.join(
                 workspace_dir, 'slr.tif')
             clip_and_reproject_raster(
-                global_dem_raster_path, local_slr_path, utm_srs.ExportToWkt(),
-                bounding_box_list, 0, 'bilinear', True,
+                local_data_path_map['slr_raster_path'], local_slr_path,
+                utm_srs.ExportToWkt(), bounding_box_list, 0, 'bilinear', True,
                 target_pixel_size)
 
             # Rrelief
@@ -2070,7 +2077,7 @@ def clip_and_mask_habitat(
         lulc_raster_path, target_pixel_size, local_lulc_path,
         'mode', target_bb=target_bb,
         target_projection_wkt=target_projection_wkt,
-        gdal_warp_options=None, working_dir=workspace_dir)
+        working_dir=workspace_dir)
 
     reclassify_threads = []
     habitat_raster_risk_map = {}
@@ -2079,7 +2086,7 @@ def clip_and_mask_habitat(
             val: 1 for val in risk_lucodes
         }
         risk_distance_mask_path = os.path.join(
-            workspace_dir, '%s_%s_mask.tif' % risk_distance_tuple)
+            workspace_dir, f'{risk_distance_tuple}_mask.tif')
 
         reclassify_thread = threading.Thread(
             target=geoprocessing.reclassify_raster,
@@ -2094,10 +2101,7 @@ def clip_and_mask_habitat(
     for reclassify_thread in reclassify_threads:
         reclassify_thread.join()
 
-
-
     return habitat_raster_risk_map
-
 
     # for vector_name, lucode_type_tuple in [
     #         ('mangroves_forest', (1, 2000)),
@@ -2280,17 +2284,12 @@ def preprocess_habitat(churn_subdirectory, scenario_config):
 
 
 def calculate_degree_cell_cv(
-        local_data_path_map, habitat_raster_risk_map,
-        shore_point_sample_distance, target_cv_vector_path,
-        local_workspace_dir):
+        local_data_path_map, target_cv_vector_path, local_workspace_dir):
     """Process all global degree grids to calculate local hab risk.
 
     Paramters:
         local_data_path_map (dict): maps keys from GLOBAL_DATA_URL to the
             local filepaths.
-        habitat_raster_risk_map (dict): maps habitat layers to raster masks,
-            indexed by habitat id maps to tuple of
-            (raster path, risk val, distance).
         shore_point_sample_distance (float): straight line distance between
             two sample points on the shore points.
         target_cv_vector_path (str): path to desiered point CV result.
@@ -2298,17 +2297,9 @@ def calculate_degree_cell_cv(
 
     Returns:
         None
-
     """
-    for dir_path in [
-            WORKSPACE_DIR, CHURN_DIR, ECOSHARD_DIR]:
-        try:
-            os.makedirs(dir_path)
-        except OSError:
-            pass
-
     shore_grid_vector = gdal.OpenEx(
-        local_data_path_map['shore_grid'], gdal.OF_VECTOR)
+        local_data_path_map['shore_grid_vector_path'], gdal.OF_VECTOR)
     shore_grid_layer = shore_grid_vector.GetLayer()
 
     bb_work_queue = multiprocessing.Queue()
@@ -2316,27 +2307,22 @@ def calculate_degree_cell_cv(
 
     cv_grid_worker_list = []
     grid_workspace_dir = os.path.join(local_workspace_dir, 'grid_workspaces')
-    for worker_id in range(int(multiprocessing.cpu_count())):
+
+    for worker_id in [1]: #range(int(multiprocessing.cpu_count())):
         cv_grid_worker_thread = multiprocessing.Process(
             target=cv_grid_worker,
             args=(
                 bb_work_queue,
                 cv_point_complete_queue,
-                local_data_path_map['landmass'],
-                local_data_path_map['geomorphology'],
-                local_data_path_map['slr'],
-                local_data_path_map['dem'],
-                local_data_path_map['global_wwiii_vector_path'],
-                habitat_raster_risk_map,
+                local_data_path_map,
                 grid_workspace_dir,
-                shore_point_sample_distance,
                 ))
         cv_grid_worker_thread.start()
         cv_grid_worker_list.append(cv_grid_worker_thread)
         LOGGER.debug('starting worker %d', worker_id)
 
     shore_grid_vector = gdal.OpenEx(
-        local_data_path_map['shore_grid'], gdal.OF_VECTOR)
+        local_data_path_map['shore_grid_vector_path'], gdal.OF_VECTOR)
     shore_grid_layer = shore_grid_vector.GetLayer()
 
     for index, shore_grid_feature in enumerate(shore_grid_layer):
@@ -2344,6 +2330,8 @@ def calculate_degree_cell_cv(
         boundary_box = shapely.wkb.loads(
             bytes(shore_grid_geom.ExportToWkb()))
         bb_work_queue.put((index, boundary_box.bounds))
+        # TODO: debug break
+        break
 
     shore_grid_vector = None
     shore_grid_layer = None
@@ -2433,20 +2421,6 @@ def main():
         config_scenario_list.append((scenario_config, scenario_id))
 
     for scenario_config, scenario_id in config_scenario_list:
-        habitat_map = eval(scenario_config[HABITAT_MAP_KEY])
-        local_data_path_map = {
-            'wwiii': scenario_config['WWIII_PATH'],
-            'slr': scenario_config['SLR_PATH'],
-            'geomorphology': scenario_config['GEOMORPHOLOGY_PATH'],
-            'dem': scenario_config['DEM_PATH'],
-            'lulc': scenario_config['LULC_PATH'],
-            'global_polygon': scenario_config['GLOBAL_POLYGON_PATH'],
-            'buffer_vector': scenario_config['BUFFER_VECTOR_PATH'],
-            'shore_grid': scenario_config['SHORE_GRID_PATH'],
-        }
-        LOGGER.debug(habitat_map)
-        LOGGER.debug(local_data_path_map)
-
         hash_obj = hashlib.sha256()
         hash_obj.update(scenario_id.encode('utf-8'))
         landcover_hash = hash_obj.hexdigest()[0:3]
@@ -2459,23 +2433,19 @@ def main():
             os.makedirs(dir_path, exist_ok=True)
         target_cv_vector_path = os.path.join(
             local_workspace_dir, '%s.gpkg' % scenario_id)
-        habitat_raster_risk_dist_map = preprocess_habitat(
-            landcover_hash, scenario_config)
-
-        return
+        # habitat_raster_risk_dist_map = preprocess_habitat(
+        #     landcover_hash, scenario_config)
 
         calculate_cv_vector_task = task_graph.add_task(
             func=calculate_degree_cell_cv,
             args=(
-                local_data_path_map,
-                scenario_id['shore_point_sample_distance'],
-                habitat_raster_risk_dist_map,
+                scenario_config,
                 target_cv_vector_path, local_workspace_dir),
             target_path_list=[target_cv_vector_path],
-            task_name='calculate CV for %s' % landcover_basename)
+            task_name=f'calculate CV for {scenario_id}')
+        calculate_cv_vector_task.join()
+        return
 
-        local_lulc_raster_path = os.path.join(
-            ECOSHARD_DIR, os.path.basename(landcover_url))
         LOGGER.info('starting hab value calc')
 
         habitat_value_token_path = os.path.join(
