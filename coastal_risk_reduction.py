@@ -199,9 +199,12 @@ def cv_grid_worker(
     """
     LOGGER.info('build geomorphology, landmass, and wwiii lookup')
 
-    geomorphology_strtree = pickle.load(geomorphology_strtree_path)
-    landmass_strtree = pickle.load(landmass_strtree_path)
-    wwiii_rtree = pickle.load(wwiii_rtree_path)
+    with open(geomorphology_strtree_path, 'rb') as geomorphology_strtree_file:
+        geomorphology_strtree = pickle.load(geomorphology_strtree_file)
+    with open(landmass_strtree_path, 'rb') as landmass_strtree_file:
+        landmass_strtree = pickle.load(landmass_strtree_file)
+    with open(wwiii_rtree_path, 'rb') as wwiii_rtree_file:
+        wwiii_rtree = pickle.load(wwiii_rtree_file)
 
     geomorphology_proj_wkt = geoprocessing.get_vector_info(
         local_data_path_map['geomorphology_vector_path'])['projection_wkt']
@@ -2181,24 +2184,6 @@ def calculate_degree_cell_cv(
     bb_work_queue = multiprocessing.Queue()
     cv_point_complete_queue = multiprocessing.Queue()
 
-    geomorphology_strtree_thread = ThreadWithReturnValue(
-        target=build_strtree,
-        args=(local_data_path_map['geomorphology_vector_path'],))
-    landmass_strtree_thread = ThreadWithReturnValue(
-        target=build_strtree,
-        args=(local_data_path_map['landmass_vector_path'],))
-    wwiii_rtree_thread = ThreadWithReturnValue(
-        target=build_rtree,
-        args=(local_data_path_map['wwiii_vector_path'],))
-
-    geomorphology_strtree_thread.start()
-    landmass_strtree_thread.start()
-    wwiii_rtree_thread.start()
-
-    geomorphology_strtree = geomorphology_strtree_thread.join()
-    landmass_strtree = landmass_strtree_thread.join()
-    wwiii_rtree = wwiii_rtree_thread.join()
-
     geomorphology_strtree_path = os.path.join(
         local_workspace_dir, 'geomorphology.dat')
     landmass_strtree_path = os.path.join(
@@ -2206,21 +2191,53 @@ def calculate_degree_cell_cv(
     wwiii_rtree_path = os.path.join(
         local_workspace_dir, 'wwiii.dat')
 
-    pickle.dump(geomorphology_strtree, geomorphology_strtree_path)
-    pickle.dump(landmass_strtree, landmass_strtree_path)
-    pickle.dump(wwiii_rtree, wwiii_rtree_path)
+    if not os.path.exists(geomorphology_strtree_path):
+        geomorphology_strtree_thread = ThreadWithReturnValue(
+            target=build_strtree,
+            args=(local_data_path_map['geomorphology_vector_path'],))
+    if not os.path.exists(geomorphology_strtree_path):
+        landmass_strtree_thread = ThreadWithReturnValue(
+            target=build_strtree,
+            args=(local_data_path_map['landmass_vector_path'],))
+    if not os.path.exists(geomorphology_strtree_path):
+        wwiii_rtree_thread = ThreadWithReturnValue(
+            target=build_rtree,
+            args=(local_data_path_map['wwiii_vector_path'],))
+
+    if not os.path.exists(geomorphology_strtree_path):
+        geomorphology_strtree_thread.start()
+    if not os.path.exists(geomorphology_strtree_path):
+        landmass_strtree_thread.start()
+    if not os.path.exists(geomorphology_strtree_path):
+        wwiii_rtree_thread.start()
+
+    if not os.path.exists(geomorphology_strtree_path):
+        geomorphology_strtree = geomorphology_strtree_thread.join()
+        with open(geomorphology_strtree_path, 'wb') as geomorphology_strtree_file:
+            pickle.dump(geomorphology_strtree, geomorphology_strtree_file)
+    if not os.path.exists(landmass_strtree_path):
+        landmass_strtree = landmass_strtree_thread.join()
+        with open(landmass_strtree_path, 'wb') as landmass_strtree_file:
+            pickle.dump(landmass_strtree, landmass_strtree_file)
+    if not os.path.exists(wwiii_rtree_path):
+        wwiii_rtree = wwiii_rtree_thread.join()
+        with open(wwiii_rtree_path, 'wb') as wwiii_rtree_file:
+            pickle.dump(wwiii_rtree, wwiii_rtree_file)
 
     cv_grid_worker_list = []
     grid_workspace_dir = os.path.join(local_workspace_dir, 'grid_workspaces')
 
     for worker_id in [1]:  # range(int(multiprocessing.cpu_count())):
-        cv_grid_worker_thread = multiprocessing.Process(
+        cv_grid_worker_thread = threading.Thread(  # multiprocessing.Process(
             target=cv_grid_worker,
             args=(
                 bb_work_queue,
                 cv_point_complete_queue,
                 local_data_path_map,
                 grid_workspace_dir,
+                geomorphology_strtree_path,
+                landmass_strtree_path,
+                wwiii_rtree_path,
                 ))
         cv_grid_worker_thread.start()
         cv_grid_worker_list.append(cv_grid_worker_thread)
