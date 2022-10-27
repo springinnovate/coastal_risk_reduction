@@ -10,6 +10,7 @@ import logging
 import math
 import multiprocessing
 import os
+import pickle
 import shutil
 import tempfile
 import threading
@@ -67,9 +68,11 @@ class ThreadWithReturnValue(threading.Thread):
             self, group=group, target=target, name=name, args=args,
             kwargs=kwargs, daemon=daemon)
         self._return = None
+
     def run(self):
         if self._target is not None:
             self._return = self._target(*self._args, **self._kwargs)
+
     def join(self, *args):
         threading.Thread.join(self, *args)
         return self._return
@@ -169,6 +172,9 @@ def cv_grid_worker(
         cv_point_complete_queue,
         local_data_path_map,
         grid_workspace_dir,
+        geomorphology_strtree_path,
+        landmass_strtree_path,
+        wwiii_rtree_path,
         ):
     """Worker process to calculate CV for a grid.
 
@@ -184,28 +190,18 @@ def cv_grid_worker(
         grid_workspace_dir (str): path to workspace to use to handle grid
         shore_point_sample_distance (float): straight line distance between
             shore sample points.
+        geomorphology_strtree_path (str): picked geomorphology tree object.
+        landmass_strtree_path (str): picked landmass tree object.
+        wwiii_rtree_path (str): picked wwiii tree object.
     Returns:
         None.
 
     """
     LOGGER.info('build geomorphology, landmass, and wwiii lookup')
-    geomorphology_strtree_thread = ThreadWithReturnValue(
-        target=build_strtree,
-        args=(local_data_path_map['geomorphology_vector_path'],))
-    landmass_strtree_thread = ThreadWithReturnValue(
-        target=build_strtree,
-        args=(local_data_path_map['landmass_vector_path'],))
-    wwiii_rtree_thread = ThreadWithReturnValue(
-        target=build_rtree,
-        args=(local_data_path_map['wwiii_vector_path'],))
 
-    geomorphology_strtree_thread.start()
-    landmass_strtree_thread.start()
-    wwiii_rtree_thread.start()
-
-    geomorphology_strtree = geomorphology_strtree_thread.join()
-    landmass_strtree = landmass_strtree_thread.join()
-    wwiii_rtree = wwiii_rtree_thread.join()
+    geomorphology_strtree = pickle.load(geomorphology_strtree_path)
+    landmass_strtree = pickle.load(landmass_strtree_path)
+    wwiii_rtree = pickle.load(wwiii_rtree_path)
 
     geomorphology_proj_wkt = geoprocessing.get_vector_info(
         local_data_path_map['geomorphology_vector_path'])['projection_wkt']
@@ -252,14 +248,16 @@ def cv_grid_worker(
                     index, lng_min, lat_min, lng_max, lat_max))
             os.makedirs(workspace_dir, exist_ok=True)
 
-            utm_srs = calculate_utm_srs((lng_min+lng_max)/2, (lat_min+lat_max)/2)
+            utm_srs = calculate_utm_srs(
+                (lng_min+lng_max)/2, (lat_min+lat_max)/2)
             wgs84_srs = osr.SpatialReference()
             wgs84_srs.ImportFromEPSG(4326)
 
             # calculate (risk, dist) -> raster mask tuples given lulc map
             # and a lookup of lulc to risk tuples
             habitat_raster_path_map = clip_and_mask_habitat(
-                risk_distance_lucode_map, local_data_path_map['lulc_raster_path'],
+                risk_distance_lucode_map,
+                local_data_path_map['lulc_raster_path'],
                 risk_dist_raster_map, buffered_bounding_box_list,
                 utm_srs.ExportToWkt(), target_pixel_size, workspace_dir)
 
@@ -306,7 +304,9 @@ def cv_grid_worker(
             # Rrelief
             LOGGER.info('calculate relief on %s', workspace_dir)
             calculate_relief(
-                shore_point_vector_path, local_dem_path, 'relief')
+                shore_point_vector_path,
+                float(local_data_path_map['relief_sample_distance']),
+                local_dem_path, 'relief')
             LOGGER.info('calculate rhab on %s', workspace_dir)
             # Rhab
             calculate_rhab(
@@ -322,14 +322,20 @@ def cv_grid_worker(
                 shore_point_sample_distance,
                 local_landmass_vector_path,
                 landmass_boundary_vector_path,
-                local_dem_path, wwiii_rtree, 'rei', 'ew')
+                local_dem_path, wwiii_rtree,
+                local_data_path_map['n_fetch_rays'],
+                local_data_path_map['max_fetch_distance'],
+                'rei', 'ew')
 
             # Rsurge
-            calculate_surge(shore_point_vector_path, local_dem_path, 'surge')
+            calculate_surge(
+                shore_point_vector_path, local_dem_path,
+                local_data_path_map['max_fetch_distance'], 'surge')
 
             # Rgeomorphology
             calculate_geomorphology(
                 shore_point_vector_path, local_geomorphology_vector_path,
+                float(local_data_path_map['max_fetch_distance']),
                 'Rgeomorphology')
 
             LOGGER.info('completed %s', shore_point_vector_path)
@@ -361,6 +367,7 @@ def make_shore_kernel(kernel_path):
 
 def calculate_geomorphology(
         shore_point_vector_path, geomorphology_vector_path,
+        max_fetch_distance,
         geomorphology_fieldname):
     """Sample the geomorphology vector path for the closest line to each point.
 
@@ -369,6 +376,8 @@ def calculate_geomorphology(
             for relief point analysis.
         geomorphology_vector_path (str): path to a vector of lines that
             contains the integer field 'SEDTYPE'.
+        max_fetch_distance (float): maximum distance to search for
+            geomporphology risk.
         geomorphology_fieldname (str): fieldname to add to
             `shore_point_vector_path`.
 
@@ -387,7 +396,7 @@ def calculate_geomorphology(
     for shore_point_feature in shore_point_layer:
         shore_point_geom = shapely.wkb.loads(
             bytes(shore_point_feature.GetGeometryRef().ExportToWkb()))
-        min_dist = MAX_FETCH_DISTANCE
+        min_dist = max_fetch_distance
         geo_risk = 5
         for line in geomorphology_strtree.query(shore_point_geom.buffer(500)):
             cur_dist = line.distance(shore_point_geom)
@@ -402,7 +411,8 @@ def calculate_geomorphology(
 
 
 def calculate_surge(
-        shore_point_vector_path, bathymetry_raster_path, surge_fieldname):
+        shore_point_vector_path, bathymetry_raster_path,
+        max_fetch_distance, surge_fieldname):
     """Calculate surge potential as distance to continental shelf (-150m).
 
     Parameters:
@@ -410,8 +420,8 @@ def calculate_surge(
             for relief point analysis.
         global_dem_path (string): path to a DEM raster projected in wgs84.
         surge_fieldname (str): fieldname to add to `shore_point_vector_path`
-        workspace_dir (string): path to a directory to make local calculations
-            in
+        max_fetch_distance (float): maximum distance to send a ray to determine
+            surge risk
         target_surge_point_vector_path (string): path to output vector.
             after completion will a value for closest distance to continental
             shelf called 'surge'.
@@ -518,7 +528,7 @@ def calculate_surge(
             point_feature.SetField(surge_fieldname, float(distance))
         else:
             # so far away it's essentially not an issue
-            point_feature.SetField(surge_fieldname, MAX_FETCH_DISTANCE)
+            point_feature.SetField(surge_fieldname, max_fetch_distance)
         shore_point_layer.SetFeature(point_feature)
 
     shore_point_layer.CommitTransaction()
@@ -531,7 +541,8 @@ def calculate_wind_and_wave(
         shore_point_vector_path,
         shore_point_sample_distance, landmass_vector_path,
         landmass_boundary_vector_path, bathymetry_raster_path,
-        wwiii_rtree, wind_fieldname, wave_fieldname):
+        wwiii_rtree, n_fetch_rays, max_fetch_distance, wind_fieldname,
+        wave_fieldname):
     """Calculate wind exposure for given points.
 
     Parameters:
@@ -548,6 +559,10 @@ def calculate_wind_and_wave(
         wwiii_rtree (str): path to an r_tree that can find the nearest point
             in lat/lng whose object has values 'REI_PCT', 'REI_V',
             'WavP_[DIR]', 'WavPPCT', 'V10PCT_[DIR]'.
+        n_fetch_rays (int): number of equally spaced rays to cast out from
+            a point to determine fetch value
+        max_fetch_distance (float): maximum distance to send a ray to determine
+            wind/wave risk
         wind_fieldname (str): fieldname to add to `shore_point_vector_path` for
             wind power.
         wave_fieldname (str): fieldname to add to `shore_point_vector_path` for
@@ -588,8 +603,8 @@ def calculate_wind_and_wave(
         ogr.FieldDefn(wind_fieldname, ogr.OFTReal))
     target_shore_point_layer.CreateField(
         ogr.FieldDefn(wave_fieldname, ogr.OFTReal))
-    for ray_index in range(N_FETCH_RAYS):
-        compass_degree = int(ray_index * 360 / N_FETCH_RAYS)
+    for ray_index in range(n_fetch_rays):
+        compass_degree = int(ray_index * 360 / n_fetch_rays)
         target_shore_point_layer.CreateField(
             ogr.FieldDefn('fdist_%d' % compass_degree, ogr.OFTReal))
         target_shore_point_layer.CreateField(
@@ -666,9 +681,9 @@ def calculate_wind_and_wave(
             shore_point_geometry = ogr.CreateGeometryFromWkb(new_point.wkb)
 
         # Iterate over every ray direction
-        for sample_index in range(N_FETCH_RAYS):
-            compass_degree = int(sample_index * 360 / N_FETCH_RAYS)
-            compass_theta = float(sample_index) / N_FETCH_RAYS * 360
+        for sample_index in range(n_fetch_rays):
+            compass_degree = int(sample_index * 360 / n_fetch_rays)
+            compass_theta = float(sample_index) / n_fetch_rays * 360
 
             # wwiii_point should be closest point to shore point
 
@@ -700,9 +715,9 @@ def calculate_wind_and_wave(
                 continue
 
             point_b_x = point_a_x + delta_x * (
-                MAX_FETCH_DISTANCE)
+                max_fetch_distance)
             point_b_y = point_a_y + delta_y * (
-                MAX_FETCH_DISTANCE)
+                max_fetch_distance)
 
             # build ray geometry so we can intersect it later
             ray_geometry = ogr.Geometry(ogr.wkbLineString)
@@ -1160,12 +1175,15 @@ def sample_line_to_points(
 
 
 def calculate_relief(
-        shore_point_vector_path, dem_path, target_fieldname):
+        shore_point_vector_path, relief_sample_distance, dem_path,
+        target_fieldname):
     """Calculate DEM relief as average coastal land area within 5km.
 
     Parameters:
         shore_point_vector_path (string):  path to a point shapefile to
             for relief point analysis.
+        relief_sample_distance (float): distance to send a ray out to
+            determine relief value
         dem_path (string): path to a DEM raster projected in local coordinates.
         target_fieldname (string): this field name will be added to
             `shore_point_vector_path` and filled with Relief values.
@@ -1208,8 +1226,8 @@ def calculate_relief(
         # convolve over a 5km radius
         dem_pixel_size = dem_info['pixel_size']
         kernel_radius = (
-            abs(RELIEF_SAMPLE_DISTANCE // dem_pixel_size[0]),
-            abs(RELIEF_SAMPLE_DISTANCE // dem_pixel_size[1]))
+            abs(relief_sample_distance // dem_pixel_size[0]),
+            abs(relief_sample_distance // dem_pixel_size[1]))
 
         kernel_filepath = os.path.join(
             tmp_working_dir, 'averaging_kernel.tif')
@@ -1682,10 +1700,12 @@ def merge_cv_points(cv_vector_queue, target_cv_vector_path):
     target_cv_layer.CommitTransaction()
 
 
-def add_cv_vector_risk(cv_risk_vector_path):
+def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
     """Use existing biophysical fields in `cv_risk_vector_path to calc total R.
 
     Args:
+        habitat_fieldname_list (list): list of habitat ids that can be used to index
+
         cv_risk_vector_path (str): path to point vector that has at least
             the following fields in it:
 
@@ -1735,7 +1755,7 @@ def add_cv_vector_risk(cv_risk_vector_path):
     cv_risk_layer.ResetReading()
 
     cv_risk_layer.CreateField(ogr.FieldDefn('Rt', ogr.OFTReal))
-    for hab_field in HAB_FIELDS:
+    for hab_field in habitat_fieldname_list:
         cv_risk_layer.CreateField(
             ogr.FieldDefn('Rhab_%s' % hab_field, ogr.OFTReal))
         cv_risk_layer.CreateField(
@@ -1747,25 +1767,18 @@ def add_cv_vector_risk(cv_risk_vector_path):
     cv_risk_layer.CreateField(ogr.FieldDefn('Rhab_all', ogr.OFTReal))
     cv_risk_layer.CreateField(ogr.FieldDefn('Rt_nohab_all', ogr.OFTReal))
 
-    # reefs are special
-    cv_risk_layer.CreateField(ogr.FieldDefn('reefs_all', ogr.OFTReal))
-
     cv_risk_layer.ResetReading()
     cv_risk_layer.StartTransaction()
     for feature in cv_risk_layer:
-        reef_risk_val = min(
-            [feature.GetField(reef_field) for reef_field in REEF_FIELDS])
-        feature.SetField('reefs_all', reef_risk_val)
-
         hab_val_map = {}
-        for hab_field in HAB_FIELDS:
+        for hab_field in habitat_fieldname_list:
             hab_val = feature.GetField(hab_field)
             feature.SetField('Rhab_%s' % hab_field, hab_val)
             hab_val_map[hab_field] = hab_val
 
             # loop through every hab field but hab_field to calc Rhab_no
             risk_diff_list = []  # for (5-rk) vals
-            for sub_hab_field in HAB_FIELDS:
+            for sub_hab_field in habitat_fieldname_list:
                 if sub_hab_field != hab_field:
                     risk_diff_list.append(5-feature.GetField(sub_hab_field))
 
@@ -1778,7 +1791,7 @@ def add_cv_vector_risk(cv_risk_vector_path):
         # Rhab
         # loop through every hab field but hab_field to calc Rhab_no
         risk_diff_list = []  # for (5-rk) vals
-        for sub_hab_field in HAB_FIELDS:
+        for sub_hab_field in habitat_fieldname_list:
             risk_diff_list.append(5-feature.GetField(sub_hab_field))
 
         r_nohab = 4.8 - 0.5 * numpy.sqrt(
@@ -1807,7 +1820,7 @@ def add_cv_vector_risk(cv_risk_vector_path):
         nohab_exposure_index = (nohab_exposure_index * 4.8)**(1./7.)
         feature.SetField('Rt_nohab_all', nohab_exposure_index)
 
-        for hab_field in HAB_FIELDS:
+        for hab_field in habitat_fieldname_list:
             nohab_exposure_index = 1.0
             for risk_field in [
                     'Rgeomorphology', 'Rsurge', 'Rwave', 'Rwind', 'Rslr',
@@ -1839,12 +1852,11 @@ def mask_by_height_op(pop_array, dem_array, mask_height, pop_nodata):
 
 def calculate_habitat_value(
         shore_sample_point_vector, template_raster_path,
-        habitat_fieldname_list, habitat_vector_path_map, results_dir,
-        habitat_value_token_path):
+        habitat_vector_path_map, results_dir):
     """Calculate habitat value.
 
     Will create rasters in the `results_dir` directory named from the
-    `habitat_fieldname_list` values containing relative importance of
+    `habitat_vector_path_map` keys containing relative importance of
     global habitat. The higher the value of a pixel the more important that
     pixel of habitat is for protection of the coastline.
 
@@ -1855,32 +1867,26 @@ def calculate_habitat_value(
         template_raster_path (str): path to an existing raster whose size and
             shape will be used to be the base of the raster that's created
             for each habitat type.
-        habitat_fieldname_list (list): list of habitat ids to analyise.
         habitat_vector_path_map (dict): maps fieldnames from
             `habitat_fieldname_list` to 3-tuples of
             (path to hab vector (str), risk val (float),
              protective distance (float)).
         results_dir (str): path to directory containing habitat back projection
             results
-        habitat_value_token_path (str): path to file to write when done
 
     Returns:
         None.
-
     """
     temp_workspace_dir = os.path.join(results_dir, 'hvc')
     for dir_path in [results_dir, temp_workspace_dir]:
-        try:
-            os.makedirs(dir_path)
-        except OSError:
-            pass
+        os.makedirs(dir_path, exist_ok=True)
 
     gpkg_driver = ogr.GetDriverByName('gpkg')
     shore_sample_point_vector = gdal.OpenEx(
         shore_sample_point_vector, gdal.OF_VECTOR)
     shore_sample_point_layer = shore_sample_point_vector.GetLayer()
 
-    for habitat_id in habitat_fieldname_list:
+    for habitat_id in habitat_vector_path_map:
         habitat_service_id = 'Rt_habservice_%s' % habitat_id
         hab_raster_path, _, protective_distance = (
             habitat_vector_path_map[habitat_id])
@@ -1926,15 +1932,9 @@ def calculate_habitat_value(
             buffer_point_feature = ogr.Feature(buffer_habitat_layer_defn)
             buffer_point_feature.SetGeometry(buffer_poly_geom)
 
-            # reefs are special
-            if habitat_id in REEF_FIELDS:
-                buffer_point_feature.SetField(
-                    habitat_service_id,
-                    point_feature.GetField('Rt_habservice_reefs_all'))
-            else:
-                buffer_point_feature.SetField(
-                    habitat_service_id,
-                    point_feature.GetField(habitat_service_id))
+            buffer_point_feature.SetField(
+                habitat_service_id,
+                point_feature.GetField(habitat_service_id))
             buffer_habitat_layer.CreateFeature(buffer_point_feature)
             buffer_point_feature = None
             point_feature = None
@@ -1983,9 +1983,6 @@ def calculate_habitat_value(
              (value_coverage_nodata, 'raw'), (hab_nodata, 'raw')],
             intersect_raster_op, habitat_value_raster_path, gdal.GDT_Float32,
             value_coverage_nodata)
-
-    with open(habitat_value_token_path, 'w') as habitat_value_file:
-        habitat_value_file.write(str(datetime.datetime.now()))
 
     shore_sample_point_vector = None
     shore_sample_point_layer = None
@@ -2150,7 +2147,7 @@ def clip_and_mask_habitat(
     # del task_graph
     # LOGGER.debug(habitat_raster_risk_map)
 
-    # # convert tuple to strings for habitat risk so we can make fields for them
+    # convert tuple to strings for habitat risk so we can make fields for them
     # tuple_list = [
     #     hab_index for hab_index in habitat_raster_risk_map
     #     if isinstance(hab_index, tuple)]
@@ -2160,127 +2157,6 @@ def clip_and_mask_habitat(
     #         habitat_raster_risk_map[tuple_index])
     #     del habitat_raster_risk_map[tuple_index]
     # return habitat_raster_risk_map
-
-
-def preprocess_habitat(churn_subdirectory, scenario_config):
-    """Merge and filter all the habitat layers.
-
-    Args:
-        churn_subdirectory (str): subdir to put results into
-        scenario_config (ConfigParser object): configuration file for
-            given scenario
-
-    Returns:
-        dictionary of habitat id to (raster path, risk, dist) tuples.
-
-    """
-    task_graph = taskgraph.TaskGraph(CHURN_DIR, -1)
-    hab_churn_dir = os.path.join(CHURN_DIR, churn_subdirectory)
-
-    # each value in `risk_distance_to_lulc_code` can be lumped into one
-    # type.
-    risk_distance_to_lulc_code = collections.defaultdict(list)
-    lulc_code_to_hab_map = eval(scenario_config[LULC_CODE_TO_HAB_MAP_KEY])
-    for lulc_code, risk_distance in lulc_code_to_hab_map.items():
-        risk_distance_to_lulc_code[risk_distance].append(lulc_code)
-
-    # this maps all the same type of codes together
-    risk_distance_set = set()
-    for lulc_code, risk_distance_tuple in lulc_code_to_hab_map.items():
-        if risk_distance_tuple[0] == 0:
-            LOGGER.info('skipping hab tuple %s', str(risk_distance_tuple))
-            continue
-        risk_distance_set.add(risk_distance_tuple)
-
-    for risk_distance_tuple in risk_distance_set:
-        matching_lulc_code_list = [
-            lucode for lucode, local_risk_tuple in lulc_code_to_hab_map.items()
-            if local_risk_tuple == risk_distance_tuple]
-        LOGGER.debug(f'{risk_distance_tuple}  -> {matching_lulc_code_list}')
-        # for lulc_code, risk_distance_tuple in scenario_config[
-        #     LULC_CODE_TO_HAB_MAP_KEY].items()]:
-        # reclassify landcover map to be ones everywhere for `lulc_code_list`
-        reclass_map = {}
-        for lulc_code in lulc_code_to_hab_map:
-            if lulc_code in matching_lulc_code_list:
-                reclass_map[lulc_code] = 1
-            else:
-                reclass_map[lulc_code] = 0
-
-        risk_distance_mask_path = os.path.join(
-            hab_churn_dir, '%s_%s_mask.tif' % risk_distance_tuple)
-
-        _ = task_graph.add_task(
-            func=geoprocessing.reclassify_raster,
-            args=(
-                (lulc_shore_mask_raster_path, 1), reclass_map,
-                risk_distance_mask_path, gdal.GDT_Byte, 0),
-            target_path_list=[risk_distance_mask_path],
-            dependent_task_list=[mask_lulc_by_shore_task],
-            task_name='map distance types %s' % str(risk_distance_tuple))
-
-        sys.exit()
-        habitat_raster_risk_map[risk_distance_tuple] = (
-            risk_distance_mask_path, risk_distance_tuple[0],
-            risk_distance_tuple[1])
-
-    for vector_name, lucode_type_tuple in [
-            ('mangroves_forest', (1, 2000)),
-            ('saltmarsh_wetland', (2, 1000))]:
-        aligned_raster_path_list = [
-            os.path.join(hab_churn_dir, x) for x in [
-                '%s_a.tif' % vector_name, '%s_b.tif' % vector_name]]
-        habitat_raster_info = geoprocessing.get_raster_info(
-            habitat_raster_risk_map[lucode_type_tuple][0])
-        align_task = task_graph.add_task(
-            func=geoprocessing.align_and_resize_raster_stack,
-            args=(
-                [habitat_raster_risk_map[lucode_type_tuple][0],
-                 local_data_path_map[vector_name]],
-                aligned_raster_path_list, ['near', 'near'],
-                habitat_raster_info['pixel_size'], 'union'),
-            target_path_list=aligned_raster_path_list,
-            task_name='align %s' % vector_name)
-
-        merged_hab_raster_path = os.path.join(
-            hab_churn_dir, 'merged_%s.tif' % vector_name)
-        nodata_0 = geoprocessing.get_raster_info(
-            aligned_raster_path_list[0])['nodata'][0]
-        nodata_1 = geoprocessing.get_raster_info(
-            aligned_raster_path_list[1])['nodata'][0]
-        _ = task_graph.add_task(
-            func=geoprocessing.raster_calculator,
-            args=(
-                ((aligned_raster_path_list[0], 1),
-                 (aligned_raster_path_list[1], 1),
-                 (nodata_0, 'raw'),
-                 (nodata_1, 'raw'),
-                 (0, 'raw')), merge_masks_op,
-                merged_hab_raster_path, gdal.GDT_Int16, 0),
-            target_path_list=[merged_hab_raster_path],
-            dependent_task_list=[align_task],
-            task_name='merge %s masks' % vector_name)
-
-        del habitat_raster_risk_map[lucode_type_tuple]
-        habitat_raster_risk_map[vector_name] = (
-            merged_hab_raster_path, lucode_type_tuple[0],
-            lucode_type_tuple[1])
-
-    task_graph.join()
-    task_graph.close()
-    del task_graph
-    LOGGER.debug(habitat_raster_risk_map)
-
-    # convert tuple to strings for habitat risk so we can make fields for them
-    tuple_list = [
-        hab_index for hab_index in habitat_raster_risk_map
-        if isinstance(hab_index, tuple)]
-    for tuple_index in tuple_list:
-        str_index = '%s_%s' % tuple_index
-        habitat_raster_risk_map[str_index] = (
-            habitat_raster_risk_map[tuple_index])
-        del habitat_raster_risk_map[tuple_index]
-    return habitat_raster_risk_map
 
 
 def calculate_degree_cell_cv(
@@ -2305,10 +2181,39 @@ def calculate_degree_cell_cv(
     bb_work_queue = multiprocessing.Queue()
     cv_point_complete_queue = multiprocessing.Queue()
 
+    geomorphology_strtree_thread = ThreadWithReturnValue(
+        target=build_strtree,
+        args=(local_data_path_map['geomorphology_vector_path'],))
+    landmass_strtree_thread = ThreadWithReturnValue(
+        target=build_strtree,
+        args=(local_data_path_map['landmass_vector_path'],))
+    wwiii_rtree_thread = ThreadWithReturnValue(
+        target=build_rtree,
+        args=(local_data_path_map['wwiii_vector_path'],))
+
+    geomorphology_strtree_thread.start()
+    landmass_strtree_thread.start()
+    wwiii_rtree_thread.start()
+
+    geomorphology_strtree = geomorphology_strtree_thread.join()
+    landmass_strtree = landmass_strtree_thread.join()
+    wwiii_rtree = wwiii_rtree_thread.join()
+
+    geomorphology_strtree_path = os.path.join(
+        local_workspace_dir, 'geomorphology.dat')
+    landmass_strtree_path = os.path.join(
+        local_workspace_dir, 'landmass.dat')
+    wwiii_rtree_path = os.path.join(
+        local_workspace_dir, 'wwiii.dat')
+
+    pickle.dump(geomorphology_strtree, geomorphology_strtree_path)
+    pickle.dump(landmass_strtree, landmass_strtree_path)
+    pickle.dump(wwiii_rtree, wwiii_rtree_path)
+
     cv_grid_worker_list = []
     grid_workspace_dir = os.path.join(local_workspace_dir, 'grid_workspaces')
 
-    for worker_id in [1]: #range(int(multiprocessing.cpu_count())):
+    for worker_id in [1]:  # range(int(multiprocessing.cpu_count())):
         cv_grid_worker_thread = multiprocessing.Process(
             target=cv_grid_worker,
             args=(
@@ -2343,6 +2248,9 @@ def calculate_degree_cell_cv(
         args=(cv_point_complete_queue, target_cv_vector_path))
     merge_cv_points_thread.start()
 
+    habitat_fieldname_list = list(eval(
+        local_data_path_map['habitat_map']).keys())
+
     for cv_grid_worker_thread in cv_grid_worker_list:
         cv_grid_worker_thread.join()
 
@@ -2351,7 +2259,7 @@ def calculate_degree_cell_cv(
     merge_cv_points_thread.join()
 
     LOGGER.debug('calculate cv vector risk')
-    add_cv_vector_risk(target_cv_vector_path)
+    add_cv_vector_risk(habitat_fieldname_list, target_cv_vector_path)
 
 
 def _process_scenario_ini(scenario_config_path):
@@ -2433,9 +2341,6 @@ def main():
             os.makedirs(dir_path, exist_ok=True)
         target_cv_vector_path = os.path.join(
             local_workspace_dir, '%s.gpkg' % scenario_id)
-        # habitat_raster_risk_dist_map = preprocess_habitat(
-        #     landcover_hash, scenario_config)
-
         calculate_cv_vector_task = task_graph.add_task(
             func=calculate_degree_cell_cv,
             args=(
@@ -2447,19 +2352,14 @@ def main():
         return
 
         LOGGER.info('starting hab value calc')
-
-        habitat_value_token_path = os.path.join(
-            local_habitat_value_dir, 'hab_value.TOKEN')
+        habitat_raster_risk_dist_map = eval(scenario_config['habitat_map'])
         task_graph.add_task(
             func=calculate_habitat_value,
             args=(
-                target_cv_vector_path, local_lulc_raster_path,
-                FINAL_HAB_FIELDS, habitat_raster_risk_dist_map,
-                local_habitat_value_dir, habitat_value_token_path),
+                target_cv_vector_path, scenario_config['lulc_raster_path'],
+                habitat_raster_risk_dist_map, local_habitat_value_dir),
             dependent_task_list=[calculate_cv_vector_task],
-            target_path_list=[habitat_value_token_path],
-            task_name=(
-                'calculate habitat value for %s' % landcover_basename))
+            task_name=f'calculate habitat value for {scenario_id}')
 
     task_graph.join()
     task_graph.close()
