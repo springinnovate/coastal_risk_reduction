@@ -172,9 +172,9 @@ def cv_grid_worker(
         cv_point_complete_queue,
         local_data_path_map,
         grid_workspace_dir,
-        geomorphology_strtree_path,
-        landmass_strtree_path,
-        wwiii_rtree_path,
+        geomorphology_strtree,
+        landmass_strtree,
+        wwiii_rtree,
         ):
     """Worker process to calculate CV for a grid.
 
@@ -190,21 +190,14 @@ def cv_grid_worker(
         grid_workspace_dir (str): path to workspace to use to handle grid
         shore_point_sample_distance (float): straight line distance between
             shore sample points.
-        geomorphology_strtree_path (str): picked geomorphology tree object.
-        landmass_strtree_path (str): picked landmass tree object.
-        wwiii_rtree_path (str): picked wwiii tree object.
+        geomorphology_strtree (strtree): geomorphology tree object.
+        landmass_strtree (strtree): landmass tree object.
+        wwiii_rtree (rtree): wwiii tree object.
     Returns:
         None.
 
     """
     LOGGER.info('build geomorphology, landmass, and wwiii lookup')
-
-    with open(geomorphology_strtree_path, 'rb') as geomorphology_strtree_file:
-        geomorphology_strtree = pickle.load(geomorphology_strtree_file)
-    with open(landmass_strtree_path, 'rb') as landmass_strtree_file:
-        landmass_strtree = pickle.load(landmass_strtree_file)
-    with open(wwiii_rtree_path, 'rb') as wwiii_rtree_file:
-        wwiii_rtree = pickle.load(wwiii_rtree_file)
 
     geomorphology_proj_wkt = geoprocessing.get_vector_info(
         local_data_path_map['geomorphology_vector_path'])['projection_wkt']
@@ -944,7 +937,8 @@ def calculate_rhab(
     shore_point_layer = shore_point_vector.GetLayer()
 
     for hab_id in habitat_raster_path_map:
-        relief_field = ogr.FieldDefn(hab_id, ogr.OFTReal)
+        LOGGER.debug(hab_id)
+        relief_field = ogr.FieldDefn(str(hab_id), ogr.OFTReal)
         relief_field.SetPrecision(5)
         relief_field.SetWidth(24)
         shore_point_layer.CreateField(relief_field)
@@ -2191,38 +2185,23 @@ def calculate_degree_cell_cv(
     wwiii_rtree_path = os.path.join(
         local_workspace_dir, 'wwiii.dat')
 
-    if not os.path.exists(geomorphology_strtree_path):
-        geomorphology_strtree_thread = ThreadWithReturnValue(
-            target=build_strtree,
-            args=(local_data_path_map['geomorphology_vector_path'],))
-    if not os.path.exists(geomorphology_strtree_path):
-        landmass_strtree_thread = ThreadWithReturnValue(
-            target=build_strtree,
-            args=(local_data_path_map['landmass_vector_path'],))
-    if not os.path.exists(geomorphology_strtree_path):
-        wwiii_rtree_thread = ThreadWithReturnValue(
-            target=build_rtree,
-            args=(local_data_path_map['wwiii_vector_path'],))
+    geomorphology_strtree_thread = ThreadWithReturnValue(
+        target=build_strtree,
+        args=(local_data_path_map['geomorphology_vector_path'],))
+    landmass_strtree_thread = ThreadWithReturnValue(
+        target=build_strtree,
+        args=(local_data_path_map['landmass_vector_path'],))
+    wwiii_rtree_thread = ThreadWithReturnValue(
+        target=build_rtree,
+        args=(local_data_path_map['wwiii_vector_path'],))
 
-    if not os.path.exists(geomorphology_strtree_path):
-        geomorphology_strtree_thread.start()
-    if not os.path.exists(geomorphology_strtree_path):
-        landmass_strtree_thread.start()
-    if not os.path.exists(geomorphology_strtree_path):
-        wwiii_rtree_thread.start()
+    geomorphology_strtree_thread.start()
+    landmass_strtree_thread.start()
+    wwiii_rtree_thread.start()
 
-    if not os.path.exists(geomorphology_strtree_path):
-        geomorphology_strtree = geomorphology_strtree_thread.join()
-        with open(geomorphology_strtree_path, 'wb') as geomorphology_strtree_file:
-            pickle.dump(geomorphology_strtree, geomorphology_strtree_file)
-    if not os.path.exists(landmass_strtree_path):
-        landmass_strtree = landmass_strtree_thread.join()
-        with open(landmass_strtree_path, 'wb') as landmass_strtree_file:
-            pickle.dump(landmass_strtree, landmass_strtree_file)
-    if not os.path.exists(wwiii_rtree_path):
-        wwiii_rtree = wwiii_rtree_thread.join()
-        with open(wwiii_rtree_path, 'wb') as wwiii_rtree_file:
-            pickle.dump(wwiii_rtree, wwiii_rtree_file)
+    geomorphology_strtree = geomorphology_strtree_thread.join()
+    landmass_strtree = landmass_strtree_thread.join()
+    wwiii_rtree = wwiii_rtree_thread.join()
 
     cv_grid_worker_list = []
     grid_workspace_dir = os.path.join(local_workspace_dir, 'grid_workspaces')
@@ -2235,9 +2214,9 @@ def calculate_degree_cell_cv(
                 cv_point_complete_queue,
                 local_data_path_map,
                 grid_workspace_dir,
-                geomorphology_strtree_path,
-                landmass_strtree_path,
-                wwiii_rtree_path,
+                geomorphology_strtree,
+                landmass_strtree,
+                wwiii_rtree,
                 ))
         cv_grid_worker_thread.start()
         cv_grid_worker_list.append(cv_grid_worker_thread)
