@@ -218,10 +218,10 @@ def cv_grid_worker(
 
     habitat_raster_path_map = eval(local_data_path_map['habitat_map'])
     risk_dist_raster_map = collections.defaultdict(list)
-    for risk_dist_path_tuple in habitat_raster_path_map.values():
+    for hab_id, risk_dist_path_tuple in habitat_raster_path_map.items():
         risk_dist_raster_map[
-            (risk_dist_path_tuple[0], risk_dist_path_tuple[1])].append(
-                risk_dist_path_tuple[2])
+            (hab_id, risk_dist_path_tuple[0], risk_dist_path_tuple[1])] = \
+                risk_dist_path_tuple[2]
 
     while True:
         try:
@@ -921,8 +921,8 @@ def calculate_rhab(
             projected coordinate system. This vector will be modified by this
             function to include a new field called `target_fieldname`
             containing the weighted Rhab risk for the given point.
-        habitat_raster_path_map (dict): a dictionary mapping "hab id"s to
-            (path to raster, risk, effective distance) tuples.
+        habitat_raster_path_map (dict): a dictionary mapping (risk, dist)
+            tuples to raster mask paths.
         target_fieldname (str): fieldname to add to `shore_point_vector_path`
             that will contain the value of Rhab calculated for that point.
         target_pixel_size (list): x/y size of clipped habitat in projected
@@ -950,8 +950,11 @@ def calculate_rhab(
     tmp_working_dir = tempfile.mkdtemp(
         prefix='calculate_rhab_',
         dir=os.path.dirname(shore_point_vector_path))
-    for hab_id, (hab_raster_path, risk_val, eff_dist) in (
+    for hab_id, payload in (
                 habitat_raster_path_map.items()):
+        LOGGER.debug(f'**********{payload}')
+        if isinstance(payload, tuple):
+            (hab_raster_path, risk_val, eff_dist) = payload
         local_hab_raster_path = os.path.join(
             tmp_working_dir, '%s.tif' % str(hab_id))
         clip_and_reproject_raster(
@@ -2049,8 +2052,8 @@ def clip_and_mask_habitat(
             ``lulc_raster_path``.
         lulc_raster_path (str): path to landcover raster with codes that are
             in the lists of ``risk_dist_lucode_map``.
-        risk_dist_raster_map (dict): mapping of (risk, dist) tuples to raster
-            binary masks indicating where those risks are
+        risk_dist_raster_map (dict): mapping of (hab_id, risk, dist) tuples to
+            raster binary masks indicating where those risks are
         target_bb (list): this is the desired target bounding box in the
             same coordinate system as ``target_projection_wkt``.
         target_projection_wkt (str): desired target projection system
@@ -2090,7 +2093,11 @@ def clip_and_mask_habitat(
             daemon=True)
         reclassify_thread.start()
         reclassify_threads.append(reclassify_thread)
-        habitat_raster_risk_map[risk_distance_tuple] = risk_distance_mask_path
+        habitat_raster_risk_map[('lulc',) + risk_distance_tuple] = \
+            risk_distance_mask_path
+
+    for (hab_id, risk, dist), mask_path in risk_dist_raster_map.items():
+        habitat_raster_risk_map[(hab_id, risk, dist)] = mask_path
 
     for reclassify_thread in reclassify_threads:
         reclassify_thread.join()
