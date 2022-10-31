@@ -10,7 +10,7 @@ import logging
 import math
 import multiprocessing
 import os
-import pickle
+import sys
 import shutil
 import tempfile
 import threading
@@ -28,7 +28,8 @@ import shapely.strtree
 import shapely.wkt
 
 gdal.SetCacheMax(2**20)
-
+ogr.UseExceptions()
+gdal.UseExceptions()
 
 WORKSPACE_DIR = 'global_cv_workspace'
 CHURN_DIR = os.path.join(WORKSPACE_DIR, 'cn')
@@ -214,6 +215,10 @@ def cv_grid_worker(
     lucode_to_hab_map = eval(local_data_path_map['lulc_code_to_hab_map'])
     risk_distance_lucode_map = collections.defaultdict(list)
     for lucode, risk_dist_tuple in lucode_to_hab_map.items():
+        if isinstance(risk_dist_tuple, tuple) and risk_dist_tuple[1] is None:
+            # this is the way we specify a "blank" landcover code
+            # just ignore
+            continue
         risk_distance_lucode_map[risk_dist_tuple].append(lucode)
 
     habitat_raster_path_map = eval(local_data_path_map['habitat_map'])
@@ -319,14 +324,14 @@ def cv_grid_worker(
                 local_landmass_vector_path,
                 landmass_boundary_vector_path,
                 local_dem_path, wwiii_rtree,
-                local_data_path_map['n_fetch_rays'],
-                local_data_path_map['max_fetch_distance'],
+                int(local_data_path_map['n_fetch_rays']),
+                float(local_data_path_map['max_fetch_distance']),
                 'rei', 'ew')
 
             # Rsurge
             calculate_surge(
                 shore_point_vector_path, local_dem_path,
-                local_data_path_map['max_fetch_distance'], 'surge')
+                float(local_data_path_map['max_fetch_distance']), 'surge')
 
             # Rgeomorphology
             calculate_geomorphology(
@@ -621,7 +626,7 @@ def calculate_wind_and_wave(
         shapely.wkb.loads(bytes(f.GetGeometryRef().ExportToWkb()))
         for f in landmass_layer]
     if landmass_geom_list:
-        landmass_union_geom = shapely.ops.cascaded_union(landmass_geom_list)
+        landmass_union_geom = shapely.ops.unary_union(landmass_geom_list)
     else:
         landmass_union_geom = shapely.Polygon()
 
@@ -636,7 +641,7 @@ def calculate_wind_and_wave(
         shapely.wkb.loads(bytes(f.GetGeometryRef().ExportToWkb()))
         for f in landmass_boundary_layer]
     if landmass_boundary_geom_list:
-        landmass_boundary_union_geom = shapely.ops.cascaded_union(
+        landmass_boundary_union_geom = shapely.ops.unary_union(
             landmass_boundary_geom_list)
     else:
         landmass_boundary_union_geom = shapely.Polygon()
@@ -936,12 +941,20 @@ def calculate_rhab(
         shore_point_vector_path, gdal.OF_VECTOR | gdal.GA_Update)
     shore_point_layer = shore_point_vector.GetLayer()
 
-    for hab_id in habitat_raster_path_map:
-        LOGGER.debug(hab_id)
-        relief_field = ogr.FieldDefn(str(hab_id), ogr.OFTReal)
-        relief_field.SetPrecision(5)
-        relief_field.SetWidth(24)
-        shore_point_layer.CreateField(relief_field)
+    shore_point_layer.StartTransaction()
+    shore_point_defn = shore_point_layer.GetLayerDefn()
+
+    for payload in habitat_raster_path_map:
+        if isinstance(payload, tuple):
+            hab_id = payload[0]
+        else:
+            continue
+        if shore_point_defn.GetFieldIndex(hab_id) == -1:
+            relief_field = ogr.FieldDefn(str(hab_id), ogr.OFTReal)
+            relief_field.SetPrecision(5)
+            relief_field.SetWidth(24)
+            shore_point_layer.CreateField(relief_field)
+    shore_point_layer.CommitTransaction()
 
     shore_point_info = geoprocessing.get_vector_info(shore_point_vector_path)
 
@@ -950,18 +963,30 @@ def calculate_rhab(
     tmp_working_dir = tempfile.mkdtemp(
         prefix='calculate_rhab_',
         dir=os.path.dirname(shore_point_vector_path))
-    for hab_id, payload in (
+    for payload, hab_raster_path_list in (
                 habitat_raster_path_map.items()):
         LOGGER.debug(f'**********{payload}')
         if isinstance(payload, tuple):
-            (hab_raster_path, risk_val, eff_dist) = payload
+            (hab_id, risk_val, eff_dist) = payload
+        elif payload == 'nohab':
+            LOGGER.error(f'got nohab on {payload} not implemented yet')
+            continue
+        else:
+            raise ValueError(f'unknown input "{hab_id}": "{payload}"')
         local_hab_raster_path = os.path.join(
-            tmp_working_dir, '%s.tif' % str(hab_id))
-        clip_and_reproject_raster(
-            hab_raster_path, local_hab_raster_path,
-            shore_point_info['projection_wkt'],
-            shore_point_info['bounding_box'], eff_dist, 'near', False,
-            target_pixel_size)
+            tmp_working_dir, f'{hab_id}.tif')
+        local_clip_stack = []
+        for hab_raster_path in hab_raster_path_list:
+            basename = os.path.basename(os.path.splitext(hab_raster_path)[0])
+            local_clip_raster_path = os.path.join(
+                tmp_working_dir, f'{basename}.tif')
+            clip_and_reproject_raster(
+                hab_raster_path, local_clip_raster_path,
+                shore_point_info['projection_wkt'],
+                shore_point_info['bounding_box'], eff_dist, 'near', False,
+                target_pixel_size)
+            local_clip_stack.append(local_clip_raster_path)
+        merge_mask_list(local_clip_stack, local_hab_raster_path)
 
         # make a convolution kernel as wide as the distance but adapted to
         # the non-square size of the rasters
@@ -984,6 +1009,9 @@ def calculate_rhab(
         hab_effective_band = hab_effective_raster.GetRasterBand(1)
         shore_point_layer.ResetReading()
         shore_point_layer.StartTransaction()
+
+        LOGGER.info(f'setting the {hab_id} field in {shore_point_vector_path}')
+
         for shore_feature in shore_point_layer:
             shore_geom = shore_feature.GetGeometryRef()
             pixel_x, pixel_y = [
@@ -998,7 +1026,6 @@ def calculate_rhab(
                 pixel_x = hab_effective_band.XSize-1
             if pixel_y >= hab_effective_band.YSize:
                 pixel_y = hab_effective_band.YSize-1
-
             try:
                 pixel_val = hab_effective_band.ReadAsArray(
                     xoff=pixel_x, yoff=pixel_y, win_xsize=1,
@@ -1014,7 +1041,6 @@ def calculate_rhab(
             shore_point_layer.SetFeature(shore_feature)
         shore_point_layer.CommitTransaction()
 
-    shore_point_layer.CommitTransaction()
     shore_point_layer = None
     shore_point_vector = None
     hab_effective_raster = None
@@ -1346,12 +1372,15 @@ def clip_and_reproject_raster(
         point.Transform(target_to_base_transform)
         bb_centroid = (point.GetX(), point.GetY())
 
-    buffered_bounding_box = [
-        local_bounding_box[0]-edge_buffer,
-        local_bounding_box[1]-edge_buffer,
-        local_bounding_box[2]+edge_buffer,
-        local_bounding_box[3]+edge_buffer,
-    ]
+    if edge_buffer is not None:
+        buffered_bounding_box = [
+            local_bounding_box[0]-edge_buffer,
+            local_bounding_box[1]-edge_buffer,
+            local_bounding_box[2]+edge_buffer,
+            local_bounding_box[3]+edge_buffer,
+        ]
+    else:
+        buffered_bounding_box = local_bounding_box
 
     # target_pixel_size = estimate_projected_pixel_size(
     #     base_raster_path, bb_centroid, target_srs_wkt)
@@ -1589,7 +1618,7 @@ def compute_wave_height(Un, Fn, dn):
             'using 1.0m/s in wave height calculation instead' % Un)
         Un = 1.0
     g = 9.81
-    dn = -dn
+    dn = abs(dn)
     ds = g*dn/Un**2
     Fs = g*Fn/Un**2
     A = numpy.tanh(0.343*ds**1.14)
@@ -1621,13 +1650,27 @@ def compute_wave_period(Un, Fn, dn):
             'using 1.0m/s in wave height calculation instead' % Un)
         Un = 1.0
     g = 9.81
-    dn = -dn
+    dn = abs(dn)
     ds = g*dn/Un**2
     Fs = g*Fn/Un**2
     A = numpy.tanh(0.1*ds**2.01)
     B = numpy.tanh(2.77e-7*Fs**1.45/A)
     T_n = 7.69*Un/g*(A*B)**0.187
     return T_n
+
+
+def merge_mask_list(mask_path_list, target_mask_path):
+    """Merge all nodata/1 masks in mask_path list to target."""
+
+    def merge_masks_op(*mask_list):
+        mask_stack = numpy.dstack(mask_list)
+        # apply along axis 2
+        result = numpy.any(mask_stack, axis=2)
+        return result
+
+    geoprocessing.raster_calculator(
+        [(path, 1) for path in mask_path_list], merge_masks_op,
+        target_mask_path, gdal.GDT_Byte, 0)
 
 
 def merge_masks_op(mask_a, mask_b, nodata_a, nodata_b, target_nodata):
@@ -1662,23 +1705,30 @@ def merge_cv_points(cv_vector_queue, target_cv_vector_path):
     wgs84_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
     target_cv_layer = (
         target_cv_vector.CreateLayer(layer_name, wgs84_srs, ogr.wkbPoint))
-    fields_to_copy = [
-        'Rgeomorphology', 'surge', 'ew', 'rei', 'slr', 'relief',
-        '4_500', '2_2000', 'reefs', 'mangroves_forest', 'saltmarsh_wetland',
-        'seagrass',
-        ]
-
-    for field_id in fields_to_copy:
-        target_cv_layer.CreateField(ogr.FieldDefn(field_id, ogr.OFTReal))
-    target_cv_layer_defn = target_cv_layer.GetLayerDefn()
 
     target_cv_layer.StartTransaction()
+    fields_to_copy = []
     while True:
         cv_vector_path = cv_vector_queue.get()
         if cv_vector_path == STOP_SENTINEL:
             break
         cv_vector = gdal.OpenEx(cv_vector_path, gdal.OF_VECTOR)
         cv_layer = cv_vector.GetLayer()
+        cv_layer_defn = cv_layer.GetLayerDefn()
+        if not fields_to_copy:
+            # create the initial set of fields
+            for fld_index in range(cv_layer_defn.GetFieldCount()):
+                original_field = cv_layer_defn.GetFieldDefn(fld_index)
+                field_name = original_field.GetName()
+                target_field = ogr.FieldDefn(
+                    field_name, original_field.GetType())
+                cv_layer.CreateField(target_field)
+                fields_to_copy.append(field_name)
+            for field_id in fields_to_copy:
+                target_cv_layer.CreateField(
+                    ogr.FieldDefn(field_id, ogr.OFTReal))
+
+        target_cv_layer_defn = target_cv_layer.GetLayerDefn()
         cv_projection = cv_layer.GetSpatialRef()
         cv_projection.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
         base_to_target_transform = osr.CoordinateTransformation(
@@ -2077,7 +2127,7 @@ def clip_and_mask_habitat(
         working_dir=workspace_dir)
 
     reclassify_threads = []
-    habitat_raster_risk_map = {}
+    habitat_raster_risk_map = collections.defaultdict(list)
     for risk_distance_tuple, risk_lucodes in risk_dist_lucode_map.items():
         reclass_map = {
             val: 1 for val in risk_lucodes
@@ -2093,11 +2143,15 @@ def clip_and_mask_habitat(
             daemon=True)
         reclassify_thread.start()
         reclassify_threads.append(reclassify_thread)
-        habitat_raster_risk_map[('lulc',) + risk_distance_tuple] = \
-            risk_distance_mask_path
+        LOGGER.debug(f'********22222 {risk_distance_tuple} {type(risk_distance_tuple)}')
+        if risk_distance_tuple == 'nohab':
+            habitat_raster_risk_map['nohab'].append(risk_distance_mask_path)
+        else:
+            habitat_raster_risk_map[('lulc',) + risk_distance_tuple].append(
+                risk_distance_mask_path)
 
     for (hab_id, risk, dist), mask_path in risk_dist_raster_map.items():
-        habitat_raster_risk_map[(hab_id, risk, dist)] = mask_path
+        habitat_raster_risk_map[(hab_id, risk, dist)].append(mask_path)
 
     for reclassify_thread in reclassify_threads:
         reclassify_thread.join()
