@@ -29,7 +29,6 @@ import shapely.wkt
 
 gdal.SetCacheMax(2**20)
 ogr.UseExceptions()
-gdal.UseExceptions()
 
 WORKSPACE_DIR = 'global_cv_workspace'
 CHURN_DIR = os.path.join(WORKSPACE_DIR, 'cn')
@@ -1722,11 +1721,8 @@ def merge_cv_points(cv_vector_queue, target_cv_vector_path):
                 field_name = original_field.GetName()
                 target_field = ogr.FieldDefn(
                     field_name, original_field.GetType())
-                cv_layer.CreateField(target_field)
+                target_cv_layer.CreateField(target_field)
                 fields_to_copy.append(field_name)
-            for field_id in fields_to_copy:
-                target_cv_layer.CreateField(
-                    ogr.FieldDefn(field_id, ogr.OFTReal))
 
         target_cv_layer_defn = target_cv_layer.GetLayerDefn()
         cv_projection = cv_layer.GetSpatialRef()
