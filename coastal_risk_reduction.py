@@ -2399,10 +2399,10 @@ def main():
             args=(
                 scenario_config,
                 target_cv_vector_path, local_workspace_dir),
+            ignore_path_list=[target_cv_vector_path],
             target_path_list=[target_cv_vector_path],
             task_name=f'calculate CV for {scenario_id}')
         calculate_cv_vector_task.join()
-        return
 
         LOGGER.info('starting hab value calc')
         habitat_raster_risk_dist_map = eval(scenario_config['habitat_map'])
