@@ -2353,7 +2353,7 @@ def calculate_degree_cell_cv(
         local_data_path_map['shore_grid_vector_path'], gdal.OF_VECTOR)
     shore_grid_layer = shore_grid_vector.GetLayer()
 
-    lulc_bb = None
+    lulc_bb_box = None
     if 'lulc_raster_path' in local_data_path_map:
         lulc_raster_info = geoprocessing.get_raster_info(
             local_data_path_map['lulc_raster_path'])
@@ -2361,7 +2361,7 @@ def calculate_degree_cell_cv(
             lulc_raster_info['bounding_box'],
             lulc_raster_info['projection_wkt'],
             osr.SRS_WKT_WGS84_LAT_LONG)
-        lulc_bb = shapely.geometry.box(*lulc_wgs84_bb)
+        lulc_bb_box = shapely.geometry.box(*lulc_wgs84_bb)
         # TODO: clip all the inputs
         clipped_dir = os.path.join(local_workspace_dir, 'clipped')
         os.makedirs(clipped_dir, exist_ok=True)
@@ -2375,7 +2375,7 @@ def calculate_degree_cell_cv(
             clip_thread = threading.Thread(
                 daemon=True,
                 target=_clip_vector,
-                args=(vector_path, clipped_vector_path, lulc_bb))
+                args=(vector_path, clipped_vector_path, lulc_wgs84_bb))
             clip_thread.start()
             worker_list.append(clip_thread)
             local_data_path_map[vector_id] = clipped_vector_path
@@ -2393,7 +2393,7 @@ def calculate_degree_cell_cv(
                 args=(
                     raster_path, raster_info['pixel_size'],
                     clipped_raster_path, 'near'),
-                kwargs={'target_bb': lulc_bb, 'working_dir': clipped_dir})
+                kwargs={'target_bb': lulc_wgs84_bb, 'working_dir': clipped_dir})
             clip_thread.start()
             local_data_path_map[raster_id] = clipped_raster_path
             worker_list.append(clip_thread)
@@ -2405,7 +2405,7 @@ def calculate_degree_cell_cv(
         shore_grid_geom = shore_grid_feature.GetGeometryRef()
         boundary_box = shapely.wkb.loads(
             bytes(shore_grid_geom.ExportToWkb()))
-        if lulc_bb is not None and not boundary_box.intersects(lulc_bb):
+        if lulc_bb_box is not None and not boundary_box.intersects(lulc_bb_box):
             continue
         bb_work_queue.put((index, boundary_box.bounds))
         n_boxes += 1
