@@ -2,10 +2,8 @@
 import glob
 import argparse
 import bisect
-import datetime
 import collections
 import configparser
-import hashlib
 import logging
 import math
 import multiprocessing
@@ -39,9 +37,6 @@ LULC_CODE_TO_HAB_MAP_KEY = 'lulc_code_to_hab_map'
 
 
 TARGET_NODATA = -1
-TARGET_CV_VECTOR_PATH = os.path.join(
-    WORKSPACE_DIR, f'''global_cv_analysis_result_{
-        datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")}.gpkg''')
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -2378,8 +2373,7 @@ def calculate_degree_cell_cv(
             worker_list.append(clip_thread)
             local_data_path_map[vector_id] = clipped_vector_path
 
-        for raster_id in [
-                'slr_raster_path', 'dem_raster_path',]:
+        for raster_id in ['slr_raster_path', 'dem_raster_path']:
             raster_path = local_data_path_map[raster_id]
             raster_info = geoprocessing.get_raster_info(raster_path)
             clipped_raster_path = os.path.join(
@@ -2390,7 +2384,8 @@ def calculate_degree_cell_cv(
                 args=(
                     raster_path, raster_info['pixel_size'],
                     clipped_raster_path, 'near'),
-                kwargs={'target_bb': lulc_wgs84_bb, 'working_dir': clipped_dir})
+                kwargs={
+                    'target_bb': lulc_wgs84_bb, 'working_dir': clipped_dir})
             clip_thread.start()
             local_data_path_map[raster_id] = clipped_raster_path
             worker_list.append(clip_thread)
@@ -2402,7 +2397,8 @@ def calculate_degree_cell_cv(
         shore_grid_geom = shore_grid_feature.GetGeometryRef()
         boundary_box = shapely.wkb.loads(
             bytes(shore_grid_geom.ExportToWkb()))
-        if lulc_bb_box is not None and not boundary_box.intersects(lulc_bb_box):
+        if (lulc_bb_box is not None and
+                not boundary_box.intersects(lulc_bb_box)):
             continue
         bb_work_queue.put((index, boundary_box.bounds))
         n_boxes += 1
@@ -2576,7 +2572,7 @@ def main():
 
     task_graph.join()
     task_graph.close()
-    LOGGER.info(f'completed successfully, result in {TARGET_CV_VECTOR_PATH}')
+    LOGGER.info('completed successfully')
 
 
 if __name__ == '__main__':
