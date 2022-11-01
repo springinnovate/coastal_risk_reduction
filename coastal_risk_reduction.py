@@ -209,23 +209,11 @@ def cv_grid_worker(
     target_pixel_size = [
         shore_point_sample_distance / 4, -shore_point_sample_distance / 4]
 
-    # map a set of (risk, dist) tuples to lists of landcover codes that
-    # match them
-    lucode_to_hab_map = eval(local_data_path_map['lulc_code_to_hab_map'])
-    risk_distance_lucode_map = collections.defaultdict(list)
-    for lucode, risk_dist_tuple in lucode_to_hab_map.items():
-        if isinstance(risk_dist_tuple, tuple) and risk_dist_tuple[1] is None:
-            # this is the way we specify a "blank" landcover code
-            # just ignore
-            continue
-        risk_distance_lucode_map[risk_dist_tuple].append(lucode)
+    risk_distance_lucode_map = _parse_lulc_code_to_hab(eval(
+        local_data_path_map['lulc_code_to_hab_map']))
 
-    habitat_raster_path_map = eval(local_data_path_map['habitat_map'])
-    risk_dist_raster_map = collections.defaultdict(list)
-    for hab_id, risk_dist_path_tuple in habitat_raster_path_map.items():
-        risk_dist_raster_map[
-            (hab_id, risk_dist_path_tuple[0], risk_dist_path_tuple[1])] = \
-                risk_dist_path_tuple[2]
+    risk_dist_raster_map = _parse_habitat_map(eval(
+        local_data_path_map['habitat_map']))
 
     while True:
         try:
@@ -251,15 +239,21 @@ def cv_grid_worker(
             utm_srs = calculate_utm_srs(
                 (lng_min+lng_max)/2, (lat_min+lat_max)/2)
             wgs84_srs = osr.SpatialReference()
-            wgs84_srs.ImportFromEPSG(4326)
+            wgs84_srs.ImportFromWkt(osr.SRS_WKT_WGS84_LAT_LONG)
+
+            local_bounding_box = geoprocessing.transform_bounding_box(
+                buffered_bounding_box_list, osr.SRS_WKT_WGS84_LAT_LONG,
+                utm_srs.ExportToWkt(), edge_samples=11)
 
             # calculate (risk, dist) -> raster mask tuples given lulc map
             # and a lookup of lulc to risk tuples
             habitat_raster_path_map = clip_and_mask_habitat(
                 risk_distance_lucode_map,
                 local_data_path_map['lulc_raster_path'],
-                risk_dist_raster_map, buffered_bounding_box_list,
+                risk_dist_raster_map, local_bounding_box,
                 utm_srs.ExportToWkt(), target_pixel_size, workspace_dir)
+
+            LOGGER.debug(habitat_raster_path_map)
 
             local_geomorphology_vector_path = os.path.join(
                 workspace_dir, 'geomorphology.gpkg')
@@ -962,16 +956,31 @@ def calculate_rhab(
     tmp_working_dir = tempfile.mkdtemp(
         prefix='calculate_rhab_',
         dir=os.path.dirname(shore_point_vector_path))
+
     for payload, hab_raster_path_list in (
                 habitat_raster_path_map.items()):
         LOGGER.debug(f'**********{payload}')
         if isinstance(payload, tuple):
             (hab_id, risk_val, eff_dist) = payload
         elif payload == 'nohab':
-            LOGGER.error(f'got nohab on {payload} not implemented yet')
             continue
         else:
             raise ValueError(f'unknown input "{hab_id}": "{payload}"')
+        nohab_raster_path = None
+        if 'nohab' in habitat_raster_path_map:
+            nohab_raster_path = os.path.join(tmp_working_dir, 'nohab.tif')
+            local_clip_stack = []
+            for hab_raster_path in habitat_raster_path_map['nohab']:
+                basename = os.path.basename(os.path.splitext(hab_raster_path)[0])
+                local_clip_raster_path = os.path.join(
+                    tmp_working_dir, f'{basename}.tif')
+                clip_and_reproject_raster(
+                    hab_raster_path, local_clip_raster_path,
+                    shore_point_info['projection_wkt'],
+                    shore_point_info['bounding_box'], eff_dist, 'near', False,
+                    target_pixel_size)
+                local_clip_stack.append(local_clip_raster_path)
+            merge_mask_list(local_clip_stack, nohab_raster_path)
         local_hab_raster_path = os.path.join(
             tmp_working_dir, f'{hab_id}.tif')
         local_clip_stack = []
@@ -986,6 +995,16 @@ def calculate_rhab(
                 target_pixel_size)
             local_clip_stack.append(local_clip_raster_path)
         merge_mask_list(local_clip_stack, local_hab_raster_path)
+        if nohab_raster_path is not None:
+            LOGGER.info(
+                f'unmasking {local_hab_raster_path} with '
+                f'{nohab_raster_path}')
+            local_habknockout_hab_raster_path = os.path.join(
+                tmp_working_dir, f'habknockout_{hab_id}.tif')
+            unmask_raster(
+                local_hab_raster_path, nohab_raster_path,
+                local_habknockout_hab_raster_path)
+            local_hab_raster_path = local_habknockout_hab_raster_path
 
         # make a convolution kernel as wide as the distance but adapted to
         # the non-square size of the rasters
@@ -1672,6 +1691,19 @@ def merge_mask_list(mask_path_list, target_mask_path):
         target_mask_path, gdal.GDT_Byte, 0)
 
 
+def unmask_raster(base_raster_path, unmask_raster_path, target_raster_path):
+    """Set base to 0 where unmask is 1."""
+
+    def knockout_masks_op(base, unmask):
+        result = base.copy()
+        result[unmask] = 0
+        return result
+
+    geoprocessing.raster_calculator(
+        [(base_raster_path, 1), (unmask_raster_path, 1)], knockout_masks_op,
+        target_raster_path, gdal.GDT_Byte, 0)
+
+
 def merge_masks_op(mask_a, mask_b, nodata_a, nodata_b, target_nodata):
     """Logically 'or' two masks together."""
     result = numpy.empty(mask_a.shape, dtype=numpy.int16)
@@ -1897,8 +1929,7 @@ def mask_by_height_op(pop_array, dem_array, mask_height, pop_nodata):
 
 
 def calculate_habitat_value(
-        shore_sample_point_vector, template_raster_path,
-        habitat_vector_path_map, results_dir):
+        shore_sample_point_vector_path, scenario_config, results_dir):
     """Calculate habitat value.
 
     Will create rasters in the `results_dir` directory named from the
@@ -1907,16 +1938,11 @@ def calculate_habitat_value(
     pixel of habitat is for protection of the coastline.
 
     Parameters:
-        shore_sample_point_vector (str): path to CV analysis vector containing
+        shore_sample_point_vector_path (str): path to CV analysis vector containing
             at least the fields `Rt` and `Rt_nohab_[hab]` for all habitat
             types under consideration.
-        template_raster_path (str): path to an existing raster whose size and
-            shape will be used to be the base of the raster that's created
-            for each habitat type.
-        habitat_vector_path_map (dict): maps fieldnames from
-            `habitat_fieldname_list` to 3-tuples of
-            (path to hab vector (str), risk val (float),
-             protective distance (float)).
+        scenario_config (configparser): scenario config with fields for
+            habitat_map, lulc_raster_path, lulc_code_to_hab_map.
         results_dir (str): path to directory containing habitat back projection
             results
 
@@ -1929,16 +1955,77 @@ def calculate_habitat_value(
 
     gpkg_driver = ogr.GetDriverByName('gpkg')
     shore_sample_point_vector = gdal.OpenEx(
-        shore_sample_point_vector, gdal.OF_VECTOR)
+        shore_sample_point_vector_path, gdal.OF_VECTOR)
     shore_sample_point_layer = shore_sample_point_vector.GetLayer()
+    shore_point_info = geoprocessing.get_vector_info(
+        shore_sample_point_vector_path)
+    target_pixel_size = (
+        eval(scenario_config['hab_val_pixel_size_wgs84']),
+        -eval(scenario_config['hab_val_pixel_size_wgs84']))
 
-    for habitat_id in habitat_vector_path_map:
-        habitat_service_id = 'Rt_habservice_%s' % habitat_id
-        hab_raster_path, _, protective_distance = (
-            habitat_vector_path_map[habitat_id])
+    risk_distance_lucode_map = _parse_lulc_code_to_hab(eval(
+        scenario_config['lulc_code_to_hab_map']))
+    risk_dist_raster_map = _parse_habitat_map(eval(
+        scenario_config['habitat_map']))
 
+    habitat_raster_path_map = clip_and_mask_habitat(
+        risk_distance_lucode_map,
+        scenario_config['lulc_raster_path'],
+        risk_dist_raster_map, eval(scenario_config['global_aoi_wgs84_bb']),
+        osr.SRS_WKT_WGS84_LAT_LONG, target_pixel_size, results_dir)
+
+    nohab_raster_path = None
+    if 'nohab' in habitat_raster_path_map:
+        nohab_raster_path = os.path.join(temp_workspace_dir, 'nohab.tif')
+        local_clip_stack = []
+        for hab_raster_path in habitat_raster_path_map['nohab']:
+            basename = os.path.basename(os.path.splitext(hab_raster_path)[0])
+            local_clip_raster_path = os.path.join(
+                temp_workspace_dir, f'{basename}.tif')
+            clip_and_reproject_raster(
+                hab_raster_path, local_clip_raster_path,
+                shore_point_info['projection_wkt'],
+                shore_point_info['bounding_box'], None, 'near', False,
+                target_pixel_size)
+            local_clip_stack.append(local_clip_raster_path)
+        merge_mask_list(local_clip_stack, nohab_raster_path)
+
+    for key, hab_raster_path_list in habitat_raster_path_map.items():
+        if key == 'nohab':
+            # already processed above
+            continue
+        (hab_id, risk, protective_distance) = key
+
+        local_hab_raster_path = os.path.join(
+            temp_workspace_dir, f'{hab_id}.tif')
+
+        local_clip_stack = []
+        for hab_raster_path in hab_raster_path_list:
+            basename = os.path.basename(os.path.splitext(hab_raster_path)[0])
+            local_clip_raster_path = os.path.join(
+                temp_workspace_dir, f'{basename}.tif')
+            clip_and_reproject_raster(
+                hab_raster_path, local_clip_raster_path,
+                shore_point_info['projection_wkt'],
+                shore_point_info['bounding_box'], None, 'near', False,
+                target_pixel_size)
+            local_clip_stack.append(local_clip_raster_path)
+        merge_mask_list(local_clip_stack, local_hab_raster_path)
+
+        if nohab_raster_path is not None:
+            LOGGER.info(
+                f'unmasking {local_hab_raster_path} with '
+                f'{nohab_raster_path}')
+            local_habknockout_hab_raster_path = os.path.join(
+                temp_workspace_dir, f'habknockout_{hab_id}.tif')
+            unmask_raster(
+                local_hab_raster_path, nohab_raster_path,
+                local_habknockout_hab_raster_path)
+            local_hab_raster_path = local_habknockout_hab_raster_path
+
+        habitat_service_id = 'Rt_habservice_%s' % hab_id
         buffer_habitat_path = os.path.join(
-            temp_workspace_dir, '%s_buffer.gpkg' % habitat_id)
+            temp_workspace_dir, '%s_buffer.gpkg' % hab_id)
         buffer_habitat_vector = gpkg_driver.CreateDataSource(
             buffer_habitat_path)
         wgs84_srs = osr.SpatialReference()
@@ -1993,10 +2080,10 @@ def calculate_habitat_value(
         buffer_habitat_layer = None
         buffer_habitat_vector = None
         value_coverage_raster_path = os.path.join(
-            temp_workspace_dir, '%s_value_cover.tif' % habitat_id)
+            temp_workspace_dir, '%s_value_cover.tif' % hab_id)
         LOGGER.info(f'create new value cover: {value_coverage_raster_path}')
         geoprocessing.new_raster_from_base(
-            template_raster_path, value_coverage_raster_path,
+            local_hab_raster_path, value_coverage_raster_path,
             gdal.GDT_Float32, [0],
             raster_driver_creation_tuple=(
                 'GTIFF', (
@@ -2012,35 +2099,50 @@ def calculate_habitat_value(
                 'MERGE_ALG=ADD'])
 
         habitat_value_raster_path = os.path.join(
-            results_dir, '%s_value.tif' % habitat_id)
+            results_dir, '%s_value.tif' % hab_id)
 
         value_coverage_nodata = geoprocessing.get_raster_info(
             value_coverage_raster_path)['nodata'][0]
         hab_nodata = geoprocessing.get_raster_info(
-            hab_raster_path)['nodata'][0]
+            local_hab_raster_path)['nodata'][0]
 
-        aligned_value_hab_raster_path_list = align_raster_list(
-            [value_coverage_raster_path, hab_raster_path],
-            temp_workspace_dir)
+        if nohab_raster_path is None:
+            aligned_value_hab_raster_path_list = align_raster_list(
+                [value_coverage_raster_path, local_hab_raster_path],
+                temp_workspace_dir)
 
-        geoprocessing.raster_calculator(
-            [(aligned_value_hab_raster_path_list[0], 1),
-             (aligned_value_hab_raster_path_list[1], 1),
-             (value_coverage_nodata, 'raw'), (hab_nodata, 'raw')],
-            intersect_raster_op, habitat_value_raster_path, gdal.GDT_Float32,
-            value_coverage_nodata)
+            geoprocessing.raster_calculator(
+                [(aligned_value_hab_raster_path_list[0], 1),
+                 (aligned_value_hab_raster_path_list[1], 1),
+                 (numpy.array([[0]])),
+                 (value_coverage_nodata, 'raw'), (hab_nodata, 'raw')],
+                intersect_raster_op, habitat_value_raster_path, gdal.GDT_Float32,
+                value_coverage_nodata)
+        else:
+            aligned_value_hab_raster_path_list = align_raster_list(
+                [value_coverage_raster_path, local_hab_raster_path,
+                 nohab_raster_path], temp_workspace_dir)
+
+            geoprocessing.raster_calculator(
+                [(aligned_value_hab_raster_path_list[0], 1),
+                 (aligned_value_hab_raster_path_list[1], 1),
+                 (aligned_value_hab_raster_path_list[2], 1),
+                 (value_coverage_nodata, 'raw'), (hab_nodata, 'raw')],
+                intersect_raster_op, habitat_value_raster_path, gdal.GDT_Float32,
+                value_coverage_nodata)
 
     shore_sample_point_vector = None
     shore_sample_point_layer = None
 
 
-def intersect_raster_op(array_a, array_b, nodata_a, nodata_b):
+def intersect_raster_op(array_a, array_b, array_knockout, nodata_a, nodata_b):
     """Only return values from a where a and b are defined."""
     result = numpy.empty_like(array_a)
     result[:] = nodata_a
     valid_mask = (
         ~numpy.isclose(array_a, nodata_a) &
-        ~numpy.isclose(array_b, nodata_b))
+        ~numpy.isclose(array_b, nodata_b) &
+        (array_knockout != 1))
     result[valid_mask] = array_a[valid_mask]
     return result
 
@@ -2124,12 +2226,18 @@ def clip_and_mask_habitat(
 
     reclassify_threads = []
     habitat_raster_risk_map = collections.defaultdict(list)
+    LOGGER.debug(f'risk dist lucode tuple: {risk_dist_lucode_map}')
     for risk_distance_tuple, risk_lucodes in risk_dist_lucode_map.items():
         reclass_map = {
             val: 1 for val in risk_lucodes
         }
         risk_distance_mask_path = os.path.join(
             workspace_dir, f'{risk_distance_tuple}_mask.tif')
+
+        # geoprocessing.reclassify_raster(
+        #         (local_lulc_path, 1), reclass_map,
+        #         risk_distance_mask_path, gdal.GDT_Byte, 0,
+        #         values_required=False)
 
         reclassify_thread = threading.Thread(
             target=geoprocessing.reclassify_raster,
@@ -2139,13 +2247,14 @@ def clip_and_mask_habitat(
             daemon=True)
         reclassify_thread.start()
         reclassify_threads.append(reclassify_thread)
-        LOGGER.debug(f'********22222 {risk_distance_tuple} {type(risk_distance_tuple)}')
         if risk_distance_tuple == 'nohab':
             habitat_raster_risk_map['nohab'].append(risk_distance_mask_path)
         else:
-            habitat_raster_risk_map[('lulc',) + risk_distance_tuple].append(
-                risk_distance_mask_path)
+            habitat_raster_risk_map[(
+                f'lulc_{risk_distance_tuple[0]}_{risk_distance_tuple[1]}',) +
+                risk_distance_tuple].append(risk_distance_mask_path)
 
+    LOGGER.debug(risk_dist_raster_map)
     for (hab_id, risk, dist), mask_path in risk_dist_raster_map.items():
         habitat_raster_risk_map[(hab_id, risk, dist)].append(mask_path)
 
@@ -2153,64 +2262,6 @@ def clip_and_mask_habitat(
         reclassify_thread.join()
 
     return habitat_raster_risk_map
-
-    # for vector_name, lucode_type_tuple in [
-    #         ('mangroves_forest', (1, 2000)),
-    #         ('saltmarsh_wetland', (2, 1000))]:
-    #     aligned_raster_path_list = [
-    #         os.path.join(hab_churn_dir, x) for x in [
-    #             '%s_a.tif' % vector_name, '%s_b.tif' % vector_name]]
-    #     habitat_raster_info = geoprocessing.get_raster_info(
-    #         habitat_raster_risk_map[lucode_type_tuple][0])
-    #     align_task = task_graph.add_task(
-    #         func=geoprocessing.align_and_resize_raster_stack,
-    #         args=(
-    #             [habitat_raster_risk_map[lucode_type_tuple][0],
-    #              local_data_path_map[vector_name]],
-    #             aligned_raster_path_list, ['near', 'near'],
-    #             habitat_raster_info['pixel_size'], 'union'),
-    #         target_path_list=aligned_raster_path_list,
-    #         task_name='align %s' % vector_name)
-
-    #     merged_hab_raster_path = os.path.join(
-    #         hab_churn_dir, 'merged_%s.tif' % vector_name)
-    #     nodata_0 = geoprocessing.get_raster_info(
-    #         aligned_raster_path_list[0])['nodata'][0]
-    #     nodata_1 = geoprocessing.get_raster_info(
-    #         aligned_raster_path_list[1])['nodata'][0]
-    #     _ = task_graph.add_task(
-    #         func=geoprocessing.raster_calculator,
-    #         args=(
-    #             ((aligned_raster_path_list[0], 1),
-    #              (aligned_raster_path_list[1], 1),
-    #              (nodata_0, 'raw'),
-    #              (nodata_1, 'raw'),
-    #              (0, 'raw')), merge_masks_op,
-    #             merged_hab_raster_path, gdal.GDT_Int16, 0),
-    #         target_path_list=[merged_hab_raster_path],
-    #         dependent_task_list=[align_task],
-    #         task_name='merge %s masks' % vector_name)
-
-    #     del habitat_raster_risk_map[lucode_type_tuple]
-    #     habitat_raster_risk_map[vector_name] = (
-    #         merged_hab_raster_path, lucode_type_tuple[0],
-    #         lucode_type_tuple[1])
-
-    # task_graph.join()
-    # task_graph.close()
-    # del task_graph
-    # LOGGER.debug(habitat_raster_risk_map)
-
-    # convert tuple to strings for habitat risk so we can make fields for them
-    # tuple_list = [
-    #     hab_index for hab_index in habitat_raster_risk_map
-    #     if isinstance(hab_index, tuple)]
-    # for tuple_index in tuple_list:
-    #     str_index = '%s_%s' % tuple_index
-    #     habitat_raster_risk_map[str_index] = (
-    #         habitat_raster_risk_map[tuple_index])
-    #     del habitat_raster_risk_map[tuple_index]
-    # return habitat_raster_risk_map
 
 
 def calculate_degree_cell_cv(
@@ -2234,13 +2285,6 @@ def calculate_degree_cell_cv(
 
     bb_work_queue = multiprocessing.Queue()
     cv_point_complete_queue = multiprocessing.Queue()
-
-    geomorphology_strtree_path = os.path.join(
-        local_workspace_dir, 'geomorphology.dat')
-    landmass_strtree_path = os.path.join(
-        local_workspace_dir, 'landmass.dat')
-    wwiii_rtree_path = os.path.join(
-        local_workspace_dir, 'wwiii.dat')
 
     geomorphology_strtree_thread = ThreadWithReturnValue(
         target=build_strtree,
@@ -2304,6 +2348,15 @@ def calculate_degree_cell_cv(
     habitat_fieldname_list = list(eval(
         local_data_path_map['habitat_map']).keys())
 
+    risk_dist_raster_map = _parse_lulc_code_to_hab(eval(
+        local_data_path_map['lulc_code_to_hab_map']))
+
+    for key in risk_dist_raster_map:
+        LOGGER.debug(key)
+        if key == 'nohab':
+            continue
+        habitat_fieldname_list.append(f'lulc_{key[0]}_{key[1]}')
+
     for cv_grid_worker_thread in cv_grid_worker_list:
         cv_grid_worker_thread.join()
 
@@ -2361,6 +2414,28 @@ def _process_scenario_ini(scenario_config_path):
     return scenario_config, scenario_id
 
 
+def _parse_habitat_map(habitat_raster_path_map):
+    risk_dist_raster_map = collections.defaultdict(list)
+    for hab_id, risk_dist_path_tuple in habitat_raster_path_map.items():
+        risk_dist_raster_map[
+            (hab_id, risk_dist_path_tuple[0], risk_dist_path_tuple[1])] = \
+                risk_dist_path_tuple[2]
+    return risk_dist_raster_map
+
+
+def _parse_lulc_code_to_hab(lulc_code_to_hab_map):
+    # map a set of (risk, dist) tuples to lists of landcover codes that
+    # match them
+    risk_distance_lucode_map = collections.defaultdict(list)
+    for lucode, risk_dist_tuple in lulc_code_to_hab_map.items():
+        if isinstance(risk_dist_tuple, tuple) and risk_dist_tuple[1] is None:
+            # this is the way we specify a "blank" landcover code
+            # just ignore
+            continue
+        risk_distance_lucode_map[risk_dist_tuple].append(lucode)
+    return risk_distance_lucode_map
+
+
 def main():
     LOGGER.debug('starting')
     parser = argparse.ArgumentParser(description='Global CV analysis')
@@ -2405,12 +2480,11 @@ def main():
         calculate_cv_vector_task.join()
 
         LOGGER.info('starting hab value calc')
-        habitat_raster_risk_dist_map = eval(scenario_config['habitat_map'])
         task_graph.add_task(
             func=calculate_habitat_value,
             args=(
-                target_cv_vector_path, scenario_config['lulc_raster_path'],
-                habitat_raster_risk_dist_map, local_habitat_value_dir),
+                target_cv_vector_path, scenario_config,
+                local_habitat_value_dir),
             dependent_task_list=[calculate_cv_vector_task],
             task_name=f'calculate habitat value for {scenario_id}')
 
