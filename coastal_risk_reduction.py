@@ -29,21 +29,14 @@ import shapely.wkt
 gdal.SetCacheMax(2**20)
 ogr.UseExceptions()
 
-WORKSPACE_DIR = 'global_cv_workspace'
-CHURN_DIR = os.path.join(WORKSPACE_DIR, 'cn')
 GLOBAL_INI_PATH = 'global_config.ini'
 NOHAB_ID = 'nohab'
-
-for dir_path in [WORKSPACE_DIR, CHURN_DIR]:
-    os.makedirs(dir_path, exist_ok=True)
 
 # These are globally defined keys expected in global_config.ini
 HABITAT_MAP_KEY = 'habitat_map'
 SHORE_POINT_SAMPLE_DISTANCE_KEY = 'shore_point_sample_distance'
 LULC_CODE_TO_HAB_MAP_KEY = 'lulc_code_to_hab_map'
 
-for dir_path in [WORKSPACE_DIR, CHURN_DIR]:
-    os.makedirs(dir_path, exist_ok=True)
 
 TARGET_NODATA = -1
 TARGET_CV_VECTOR_PATH = os.path.join(
@@ -2543,9 +2536,6 @@ def main():
     args = parser.parse_args()
 
     scenario_config_path_list = list(glob.glob(args.scenario_config_path))
-    task_graph = taskgraph.TaskGraph(
-        WORKSPACE_DIR,
-        min(len(scenario_config_path_list), multiprocessing.cpu_count()), 5.0)
     LOGGER.info(f'''parsing and validating {
         len(scenario_config_path_list)} configuration files''')
     config_scenario_list = []
@@ -2555,14 +2545,12 @@ def main():
         config_scenario_list.append((scenario_config, scenario_id))
 
     for scenario_config, scenario_id in config_scenario_list:
-        hash_obj = hashlib.sha256()
-        hash_obj.update(scenario_id.encode('utf-8'))
-        landcover_hash = hash_obj.hexdigest()[0:3]
-        local_workspace_dir = os.path.join(WORKSPACE_DIR, landcover_hash)
-        with open('hashtrans.txt', 'a') as hash_file:
-            hash_file.write(f'{scenario_id} -> {landcover_hash}\n')
+        workspace_dir = scenario_config['workspace_dir']
+        os.makedirs(workspace_dir, exist_ok=True)
+        task_graph = taskgraph.TaskGraph(workspace_dir, -1)
+        local_workspace_dir = os.path.join(workspace_dir, scenario_id)
         local_habitat_value_dir = os.path.join(
-            WORKSPACE_DIR, landcover_hash, 'value_rasters')
+            workspace_dir, scenario_id, 'value_rasters')
         for dir_path in [local_workspace_dir, local_habitat_value_dir]:
             os.makedirs(dir_path, exist_ok=True)
         target_cv_vector_path = os.path.join(
