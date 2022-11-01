@@ -2307,7 +2307,7 @@ def calculate_degree_cell_cv(
     cv_grid_worker_list = []
     grid_workspace_dir = os.path.join(local_workspace_dir, 'grid_workspaces')
 
-    for worker_id in [1]:  # range(int(multiprocessing.cpu_count())):
+    for worker_id in range(int(multiprocessing.cpu_count())):
         cv_grid_worker_thread = threading.Thread(  # multiprocessing.Process(
             target=cv_grid_worker,
             args=(
@@ -2332,8 +2332,6 @@ def calculate_degree_cell_cv(
         boundary_box = shapely.wkb.loads(
             bytes(shore_grid_geom.ExportToWkb()))
         bb_work_queue.put((index, boundary_box.bounds))
-        # TODO: debug break
-        break
 
     shore_grid_vector = None
     shore_grid_layer = None
