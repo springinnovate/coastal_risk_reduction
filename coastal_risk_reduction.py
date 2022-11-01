@@ -175,6 +175,9 @@ def cv_grid_worker(
         geomorphology_strtree,
         landmass_strtree,
         wwiii_rtree,
+        geomorphology_strtree_lock,
+        landmass_strtree_lock,
+        wwiii_rtree_lock,
         ):
     """Worker process to calculate CV for a grid.
 
@@ -193,6 +196,11 @@ def cv_grid_worker(
         geomorphology_strtree (strtree): geomorphology tree object.
         landmass_strtree (strtree): landmass tree object.
         wwiii_rtree (rtree): wwiii tree object.
+        geomorphology_strtree_lock (threading.Lock): lock object for
+            geomorphology tree object.
+        landmass_strtree_lock (threading.Lock): lock object for landmass tree
+            object.
+        wwiii_rtree_lock (threading.Lock): lock object for wwiii tree object.
     Returns:
         None.
 
@@ -260,6 +268,7 @@ def cv_grid_worker(
             clip_geometry(
                 bounding_box_list, wgs84_srs, utm_srs,
                 ogr.wkbMultiLineString, geomorphology_strtree,
+                geomorphology_strtree_lock,
                 local_geomorphology_vector_path)
 
             shore_point_vector_path = os.path.join(
@@ -272,7 +281,7 @@ def cv_grid_worker(
                 workspace_dir, 'landmass.gpkg')
             clip_geometry(
                 buffered_bounding_box_list, wgs84_srs, utm_srs,
-                ogr.wkbPolygon, landmass_strtree,
+                ogr.wkbPolygon, landmass_strtree, landmass_strtree_lock,
                 local_landmass_vector_path)
 
             landmass_boundary_vector_path = os.path.join(
@@ -316,7 +325,7 @@ def cv_grid_worker(
                 shore_point_sample_distance,
                 local_landmass_vector_path,
                 landmass_boundary_vector_path,
-                local_dem_path, wwiii_rtree,
+                local_dem_path, wwiii_rtree, wwiii_rtree_lock,
                 int(local_data_path_map['n_fetch_rays']),
                 float(local_data_path_map['max_fetch_distance']),
                 'rei', 'ew')
@@ -535,8 +544,8 @@ def calculate_wind_and_wave(
         shore_point_vector_path,
         shore_point_sample_distance, landmass_vector_path,
         landmass_boundary_vector_path, bathymetry_raster_path,
-        wwiii_rtree, n_fetch_rays, max_fetch_distance, wind_fieldname,
-        wave_fieldname):
+        wwiii_rtree, wwiii_rtree_lock, n_fetch_rays, max_fetch_distance,
+        wind_fieldname, wave_fieldname):
     """Calculate wind exposure for given points.
 
     Parameters:
@@ -553,6 +562,7 @@ def calculate_wind_and_wave(
         wwiii_rtree (str): path to an r_tree that can find the nearest point
             in lat/lng whose object has values 'REI_PCT', 'REI_V',
             'WavP_[DIR]', 'WavPPCT', 'V10PCT_[DIR]'.
+        wwiii_rtree_lock (threading.Lock): lock object for wwiii_tree
         n_fetch_rays (int): number of equally spaced rays to cast out from
             a point to determine fetch value
         max_fetch_distance (float): maximum distance to send a ray to determine
@@ -657,9 +667,10 @@ def calculate_wind_and_wave(
     for shore_point_feature in target_shore_point_layer:
         shore_point_geom = shore_point_feature.GetGeometryRef().Clone()
         _ = shore_point_geom.Transform(base_to_target_transform)
-        wwiii_point = next(wwiii_rtree.nearest(
-            (shore_point_geom.GetX(), shore_point_geom.GetY()), 1,
-            objects='raw'))
+        with wwiii_rtree_lock:
+            wwiii_point = next(wwiii_rtree.nearest(
+                (shore_point_geom.GetX(), shore_point_geom.GetY()), 1,
+                objects='raw'))
         rei_value = 0.0
         height_list = []
         period_list = []
@@ -1099,7 +1110,7 @@ def calculate_utm_srs(lng, lat):
 
 def clip_geometry(
         bounding_box_coords, base_srs, target_srs, ogr_geometry_type,
-        global_geom_strtree, target_vector_path):
+        global_geom_strtree, strtree_lock, target_vector_path):
     """Clip geometry in `global_geom_strtree` to bounding box.
 
     Parameters:
@@ -1116,6 +1127,7 @@ def clip_geometry(
             `target_fieldname` and used to quickly query geometry. Main object
             will have `field_name_type_list` field used to describe the
             original field name/types.
+        strtree_lock (threading.Lock): lock object for strtree
         target_vector_path (str): path to vector to create that will contain
             locally projected geometry clipped to the given bounding box.
 
@@ -1129,7 +1141,8 @@ def clip_geometry(
     layer = vector.CreateLayer(
         os.path.splitext(os.path.basename(target_vector_path))[0],
         target_srs, ogr_geometry_type)
-    for field_name, field_type in global_geom_strtree.field_name_type_list:
+    field_name_type_list = list(global_geom_strtree.field_name_type_list)
+    for field_name, field_type in field_name_type_list:
         layer.CreateField(ogr.FieldDefn(field_name, field_type))
     layer_defn = layer.GetLayerDefn()
     base_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
@@ -1138,8 +1151,8 @@ def clip_geometry(
         base_srs, target_srs)
 
     bounding_box = shapely.geometry.box(*bounding_box_coords)
-
-    possible_geom_list = global_geom_strtree.query(bounding_box)
+    with strtree_lock:
+        possible_geom_list = global_geom_strtree.query(bounding_box)
     if not possible_geom_list:
         layer = None
         vector = None
@@ -1153,7 +1166,7 @@ def clip_geometry(
             continue
         feature = ogr.Feature(layer_defn)
         feature.SetGeometry(clipped_geom.Clone())
-        for field_name, _ in global_geom_strtree.field_name_type_list:
+        for field_name, _ in field_name_type_list:
             feature.SetField(
                 field_name, geom.field_val_map[field_name])
         layer.CreateFeature(feature)
@@ -2304,10 +2317,14 @@ def calculate_degree_cell_cv(
     landmass_strtree = landmass_strtree_thread.join()
     wwiii_rtree = wwiii_rtree_thread.join()
 
+    geomorphology_strtree_lock = threading.Lock()
+    landmass_strtree_lock = threading.Lock()
+    wwiii_rtree_lock = threading.Lock()
+
     cv_grid_worker_list = []
     grid_workspace_dir = os.path.join(local_workspace_dir, 'grid_workspaces')
 
-    for worker_id in range(int(multiprocessing.cpu_count())):
+    for worker_id in [1, 2, 3, 4]: # range(int(multiprocessing.cpu_count())):
         cv_grid_worker_thread = threading.Thread(  # multiprocessing.Process(
             target=cv_grid_worker,
             args=(
@@ -2318,6 +2335,9 @@ def calculate_degree_cell_cv(
                 geomorphology_strtree,
                 landmass_strtree,
                 wwiii_rtree,
+                geomorphology_strtree_lock,
+                landmass_strtree_lock,
+                wwiii_rtree_lock,
                 ))
         cv_grid_worker_thread.start()
         cv_grid_worker_list.append(cv_grid_worker_thread)
