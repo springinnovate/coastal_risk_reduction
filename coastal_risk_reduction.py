@@ -1987,7 +1987,7 @@ def calculate_habitat_value(
     habitat_raster_path_map = clip_and_mask_habitat(
         risk_distance_lucode_map,
         scenario_config['lulc_raster_path'],
-        risk_dist_raster_map, eval(scenario_config['global_aoi_wgs84_bb']),
+        risk_dist_raster_map, shore_point_info['projection_wkt'],
         osr.SRS_WKT_WGS84_LAT_LONG, target_pixel_size, results_dir)
 
     nohab_raster_path = None
