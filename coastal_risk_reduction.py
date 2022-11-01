@@ -2280,6 +2280,50 @@ def clip_and_mask_habitat(
     return habitat_raster_risk_map
 
 
+def _clip_vector(
+        base_vector_path, target_vector_path, target_bb):
+    """Clip base vector to target with the given bounding box."""
+    base_vector = ogr.Open(base_vector_path)
+    base_layer = base_vector.GetLayer()
+    base_layer_dfn = base_layer.GetLayerDefn()
+    basename = os.path.splitext(os.path.basename(base_vector_path))[0]
+    driver = ogr.GetDriverByName('GPKG')
+    vector = driver.CreateDataSource(target_vector_path)
+    target_layer = vector.CreateLayer(
+        basename, base_layer.GetSpatialRef(), base_layer.GetGeomType())
+
+    field_names = []
+    for fld_index in range(base_layer_dfn.GetFieldCount()):
+        original_field = base_layer_dfn.GetFieldDefn(fld_index)
+        field_name = original_field.GetName()
+        target_field = ogr.FieldDefn(
+            field_name, original_field.GetType())
+        target_layer.CreateField(target_field)
+        field_names.append(field_name)
+
+    filter_box = shapely.geometry.box(*target_bb)
+    base_layer.SetSpatialFilter(ogr.CreateGeometryFromWkt(filter_box.wkt))
+
+    target_layer.StartTransaction()
+    for base_feature in base_layer:
+        geom = base_feature.GetGeometryRef()
+
+        # Copy original_datasource's feature and set as new shapes feature
+        target_feature = ogr.Feature(target_layer.GetLayerDefn())
+        target_feature.SetGeometry(geom)
+
+        # For all the fields in the feature set the field values from the
+        # source field
+        for field_name in field_names:
+            target_feature.SetField(
+                field_name, base_feature.GetField(field_name))
+
+        target_layer.CreateFeature(target_feature)
+        target_feature = None
+        base_feature = None
+    target_layer.CommitTransaction()
+
+
 def calculate_degree_cell_cv(
         local_data_path_map, target_cv_vector_path, local_workspace_dir):
     """Process all global degree grids to calculate local hab risk.
@@ -2318,6 +2362,43 @@ def calculate_degree_cell_cv(
             lulc_raster_info['projection_wkt'],
             osr.SRS_WKT_WGS84_LAT_LONG)
         lulc_bb = shapely.geometry.box(*lulc_wgs84_bb)
+        # TODO: clip all the inputs
+        clipped_dir = os.path.join(local_workspace_dir, 'clipped')
+        os.makedirs(clipped_dir, exist_ok=True)
+        worker_list = []
+        for vector_id in [
+                'wwiii_vector_path', 'geomorphology_vector_path',
+                'landmass_vector_path', 'buffer_vector_path']:
+            vector_path = local_data_path_map[vector_id]
+            clipped_vector_path = os.path.join(
+                clipped_dir, os.path.basename(vector_path))
+            clip_thread = threading.Thread(
+                daemon=True,
+                target=_clip_vector,
+                args=(vector_path, clipped_vector_path, lulc_bb))
+            clip_thread.start()
+            worker_list.append(clip_thread)
+            local_data_path_map[vector_id] = clipped_vector_path
+
+        for raster_id in [
+                'slr_raster_path', 'dem_raster_path',
+                'shore_grid_vector_path']:
+            raster_path = local_data_path_map[raster_id]
+            raster_info = geoprocessing.get_raster_info(raster_path)
+            clipped_raster_path = os.path.join(
+                clipped_dir, os.path.basename(raster_path))
+            clip_thread = threading.Thread(
+                daemon=True,
+                target=geoprocessing.warp_raster,
+                args=(
+                    raster_path, raster_info['pixel_size'],
+                    clipped_raster_path, 'near'),
+                kwargs={'target_bb': lulc_bb, 'working_dir': clipped_dir})
+            clip_thread.start()
+            local_data_path_map[raster_id] = clipped_raster_path
+            worker_list.append(clip_thread)
+        for worker_thread in worker_list:
+            worker_thread.join()
 
     n_boxes = 0
     for index, shore_grid_feature in enumerate(shore_grid_layer):
