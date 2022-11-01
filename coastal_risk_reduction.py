@@ -2339,6 +2339,10 @@ def calculate_degree_cell_cv(
     Returns:
         None
     """
+    LOGGER.info('just checking that lulcode map is correctly defined')
+    _ = _parse_lulc_code_to_hab(eval(
+        local_data_path_map['lulc_code_to_hab_map']))
+
     shore_grid_vector = gdal.OpenEx(
         local_data_path_map['shore_grid_vector_path'], gdal.OF_VECTOR)
     shore_grid_layer = shore_grid_vector.GetLayer()
@@ -2368,7 +2372,8 @@ def calculate_degree_cell_cv(
         worker_list = []
         for vector_id in [
                 'wwiii_vector_path', 'geomorphology_vector_path',
-                'landmass_vector_path', 'buffer_vector_path']:
+                'landmass_vector_path', 'buffer_vector_path',
+                'shore_grid_vector_path']:
             vector_path = local_data_path_map[vector_id]
             clipped_vector_path = os.path.join(
                 clipped_dir, os.path.basename(vector_path))
@@ -2381,8 +2386,7 @@ def calculate_degree_cell_cv(
             local_data_path_map[vector_id] = clipped_vector_path
 
         for raster_id in [
-                'slr_raster_path', 'dem_raster_path',
-                'shore_grid_vector_path']:
+                'slr_raster_path', 'dem_raster_path',]:
             raster_path = local_data_path_map[raster_id]
             raster_info = geoprocessing.get_raster_info(raster_path)
             clipped_raster_path = os.path.join(
@@ -2520,6 +2524,12 @@ def _parse_lulc_code_to_hab(lulc_code_to_hab_map):
             # this is the way we specify a "blank" landcover code
             # just ignore
             continue
+        if (not isinstance(risk_dist_tuple, tuple)
+                and risk_dist_tuple != 'nohab'):
+            raise ValueError(
+                f'expected only tuples or "nohab" but got this value instead '
+                f'could it be that it is quoted as a string? '
+                f'"{risk_dist_tuple}"')
         risk_distance_lucode_map[risk_dist_tuple].append(lucode)
     return risk_distance_lucode_map
 
