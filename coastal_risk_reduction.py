@@ -172,12 +172,6 @@ def cv_grid_worker(
         cv_point_complete_queue,
         local_data_path_map,
         grid_workspace_dir,
-        geomorphology_strtree,
-        landmass_strtree,
-        wwiii_rtree,
-        geomorphology_strtree_lock,
-        landmass_strtree_lock,
-        wwiii_rtree_lock,
         ):
     """Worker process to calculate CV for a grid.
 
@@ -193,19 +187,29 @@ def cv_grid_worker(
         grid_workspace_dir (str): path to workspace to use to handle grid
         shore_point_sample_distance (float): straight line distance between
             shore sample points.
-        geomorphology_strtree (strtree): geomorphology tree object.
-        landmass_strtree (strtree): landmass tree object.
-        wwiii_rtree (rtree): wwiii tree object.
-        geomorphology_strtree_lock (threading.Lock): lock object for
-            geomorphology tree object.
-        landmass_strtree_lock (threading.Lock): lock object for landmass tree
-            object.
-        wwiii_rtree_lock (threading.Lock): lock object for wwiii tree object.
     Returns:
         None.
 
     """
     LOGGER.info('build geomorphology, landmass, and wwiii lookup')
+
+    geomorphology_strtree_thread = ThreadWithReturnValue(
+        target=build_strtree,
+        args=(local_data_path_map['geomorphology_vector_path'],))
+    landmass_strtree_thread = ThreadWithReturnValue(
+        target=build_strtree,
+        args=(local_data_path_map['landmass_vector_path'],))
+    wwiii_rtree_thread = ThreadWithReturnValue(
+        target=build_rtree,
+        args=(local_data_path_map['wwiii_vector_path'],))
+
+    geomorphology_strtree_thread.start()
+    landmass_strtree_thread.start()
+    wwiii_rtree_thread.start()
+
+    geomorphology_strtree = geomorphology_strtree_thread.join()
+    landmass_strtree = landmass_strtree_thread.join()
+    wwiii_rtree = wwiii_rtree_thread.join()
 
     geomorphology_proj_wkt = geoprocessing.get_vector_info(
         local_data_path_map['geomorphology_vector_path'])['projection_wkt']
@@ -268,7 +272,6 @@ def cv_grid_worker(
             clip_geometry(
                 bounding_box_list, wgs84_srs, utm_srs,
                 ogr.wkbMultiLineString, geomorphology_strtree,
-                geomorphology_strtree_lock,
                 local_geomorphology_vector_path)
 
             shore_point_vector_path = os.path.join(
@@ -281,7 +284,7 @@ def cv_grid_worker(
                 workspace_dir, 'landmass.gpkg')
             clip_geometry(
                 buffered_bounding_box_list, wgs84_srs, utm_srs,
-                ogr.wkbPolygon, landmass_strtree, landmass_strtree_lock,
+                ogr.wkbPolygon, landmass_strtree,
                 local_landmass_vector_path)
 
             landmass_boundary_vector_path = os.path.join(
@@ -325,7 +328,7 @@ def cv_grid_worker(
                 shore_point_sample_distance,
                 local_landmass_vector_path,
                 landmass_boundary_vector_path,
-                local_dem_path, wwiii_rtree, wwiii_rtree_lock,
+                local_dem_path, wwiii_rtree,
                 int(local_data_path_map['n_fetch_rays']),
                 float(local_data_path_map['max_fetch_distance']),
                 'rei', 'ew')
@@ -544,7 +547,7 @@ def calculate_wind_and_wave(
         shore_point_vector_path,
         shore_point_sample_distance, landmass_vector_path,
         landmass_boundary_vector_path, bathymetry_raster_path,
-        wwiii_rtree, wwiii_rtree_lock, n_fetch_rays, max_fetch_distance,
+        wwiii_rtree, n_fetch_rays, max_fetch_distance,
         wind_fieldname, wave_fieldname):
     """Calculate wind exposure for given points.
 
@@ -562,7 +565,6 @@ def calculate_wind_and_wave(
         wwiii_rtree (str): path to an r_tree that can find the nearest point
             in lat/lng whose object has values 'REI_PCT', 'REI_V',
             'WavP_[DIR]', 'WavPPCT', 'V10PCT_[DIR]'.
-        wwiii_rtree_lock (threading.Lock): lock object for wwiii_tree
         n_fetch_rays (int): number of equally spaced rays to cast out from
             a point to determine fetch value
         max_fetch_distance (float): maximum distance to send a ray to determine
@@ -667,10 +669,9 @@ def calculate_wind_and_wave(
     for shore_point_feature in target_shore_point_layer:
         shore_point_geom = shore_point_feature.GetGeometryRef().Clone()
         _ = shore_point_geom.Transform(base_to_target_transform)
-        with wwiii_rtree_lock:
-            wwiii_point = next(wwiii_rtree.nearest(
-                (shore_point_geom.GetX(), shore_point_geom.GetY()), 1,
-                objects='raw'))
+        wwiii_point = next(wwiii_rtree.nearest(
+            (shore_point_geom.GetX(), shore_point_geom.GetY()), 1,
+            objects='raw'))
         rei_value = 0.0
         height_list = []
         period_list = []
@@ -881,6 +882,7 @@ def calculate_slr(shore_point_vector_path, slr_raster_path, target_fieldname):
         slr_band = slr_raster.GetRasterBand(1)
 
         shore_point_layer.ResetReading()
+        shore_point_layer.StartTransaction()
         for point_feature in shore_point_layer:
             point_geometry = point_feature.GetGeometryRef()
             point_x, point_y = point_geometry.GetX(), point_geometry.GetY()
@@ -908,6 +910,7 @@ def calculate_slr(shore_point_vector_path, slr_raster_path, target_fieldname):
                 raise
             point_feature.SetField(target_fieldname, float(pixel_value))
             shore_point_layer.SetFeature(point_feature)
+        shore_point_layer.CommitTransaction()
 
         shore_point_layer.SyncToDisk()
         shore_point_layer = None
@@ -1110,7 +1113,7 @@ def calculate_utm_srs(lng, lat):
 
 def clip_geometry(
         bounding_box_coords, base_srs, target_srs, ogr_geometry_type,
-        global_geom_strtree, strtree_lock, target_vector_path):
+        global_geom_strtree, target_vector_path):
     """Clip geometry in `global_geom_strtree` to bounding box.
 
     Parameters:
@@ -1127,7 +1130,6 @@ def clip_geometry(
             `target_fieldname` and used to quickly query geometry. Main object
             will have `field_name_type_list` field used to describe the
             original field name/types.
-        strtree_lock (threading.Lock): lock object for strtree
         target_vector_path (str): path to vector to create that will contain
             locally projected geometry clipped to the given bounding box.
 
@@ -1151,8 +1153,7 @@ def clip_geometry(
         base_srs, target_srs)
 
     bounding_box = shapely.geometry.box(*bounding_box_coords)
-    with strtree_lock:
-        possible_geom_list = global_geom_strtree.query(bounding_box)
+    possible_geom_list = global_geom_strtree.query(bounding_box)
     if not possible_geom_list:
         layer = None
         vector = None
@@ -1300,6 +1301,7 @@ def calculate_relief(
         inv_gt = gdal.InvGeoTransform(dem_info['geotransform'])
 
         shore_point_layer.ResetReading()
+        shore_point_layer.StartTransaction()
         for point_feature in shore_point_layer:
             point_geometry = point_feature.GetGeometryRef()
             point_x, point_y = point_geometry.GetX(), point_geometry.GetY()
@@ -1332,6 +1334,7 @@ def calculate_relief(
             point_feature.SetField(target_fieldname, -float(pixel_value))
             shore_point_layer.SetFeature(point_feature)
 
+        shore_point_layer.CommitTransaction()
         shore_point_layer.SyncToDisk()
         shore_point_layer = None
         shore_point_vector = None
@@ -2299,59 +2302,46 @@ def calculate_degree_cell_cv(
     bb_work_queue = multiprocessing.Queue()
     cv_point_complete_queue = multiprocessing.Queue()
 
-    geomorphology_strtree_thread = ThreadWithReturnValue(
-        target=build_strtree,
-        args=(local_data_path_map['geomorphology_vector_path'],))
-    landmass_strtree_thread = ThreadWithReturnValue(
-        target=build_strtree,
-        args=(local_data_path_map['landmass_vector_path'],))
-    wwiii_rtree_thread = ThreadWithReturnValue(
-        target=build_rtree,
-        args=(local_data_path_map['wwiii_vector_path'],))
-
-    geomorphology_strtree_thread.start()
-    landmass_strtree_thread.start()
-    wwiii_rtree_thread.start()
-
-    geomorphology_strtree = geomorphology_strtree_thread.join()
-    landmass_strtree = landmass_strtree_thread.join()
-    wwiii_rtree = wwiii_rtree_thread.join()
-
-    geomorphology_strtree_lock = threading.Lock()
-    landmass_strtree_lock = threading.Lock()
-    wwiii_rtree_lock = threading.Lock()
-
     cv_grid_worker_list = []
     grid_workspace_dir = os.path.join(local_workspace_dir, 'grid_workspaces')
 
-    for worker_id in [1, 2, 3, 4]: # range(int(multiprocessing.cpu_count())):
-        cv_grid_worker_thread = threading.Thread(  # multiprocessing.Process(
+
+    shore_grid_vector = gdal.OpenEx(
+        local_data_path_map['shore_grid_vector_path'], gdal.OF_VECTOR)
+    shore_grid_layer = shore_grid_vector.GetLayer()
+
+    lulc_bb = None
+    if 'lulc_raster_path' in local_data_path_map:
+        lulc_raster_info = geoprocessing.get_raster_info(
+            local_data_path_map['lulc_raster_path'])
+        lulc_wgs84_bb = geoprocessing.transform_bounding_box(
+            lulc_raster_info['bounding_box'],
+            lulc_raster_info['projection_wkt'],
+            osr.SRS_WKT_WGS84_LAT_LONG)
+        lulc_bb = shapely.geometry.box(*lulc_wgs84_bb)
+
+    n_boxes = 0
+    for index, shore_grid_feature in enumerate(shore_grid_layer):
+        shore_grid_geom = shore_grid_feature.GetGeometryRef()
+        boundary_box = shapely.wkb.loads(
+            bytes(shore_grid_geom.ExportToWkb()))
+        if lulc_bb is not None and not boundary_box.intersects(lulc_bb):
+            continue
+        bb_work_queue.put((index, boundary_box.bounds))
+        n_boxes += 1
+
+    for worker_id in range(min(n_boxes+1, int(multiprocessing.cpu_count()))):
+        cv_grid_worker_thread = multiprocessing.Process( # threading.Thread(
             target=cv_grid_worker,
             args=(
                 bb_work_queue,
                 cv_point_complete_queue,
                 local_data_path_map,
                 grid_workspace_dir,
-                geomorphology_strtree,
-                landmass_strtree,
-                wwiii_rtree,
-                geomorphology_strtree_lock,
-                landmass_strtree_lock,
-                wwiii_rtree_lock,
                 ))
         cv_grid_worker_thread.start()
         cv_grid_worker_list.append(cv_grid_worker_thread)
         LOGGER.debug('starting worker %d', worker_id)
-
-    shore_grid_vector = gdal.OpenEx(
-        local_data_path_map['shore_grid_vector_path'], gdal.OF_VECTOR)
-    shore_grid_layer = shore_grid_vector.GetLayer()
-
-    for index, shore_grid_feature in enumerate(shore_grid_layer):
-        shore_grid_geom = shore_grid_feature.GetGeometryRef()
-        boundary_box = shapely.wkb.loads(
-            bytes(shore_grid_geom.ExportToWkb()))
-        bb_work_queue.put((index, boundary_box.bounds))
 
     shore_grid_vector = None
     shore_grid_layer = None
