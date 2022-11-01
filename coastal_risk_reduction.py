@@ -10,7 +10,6 @@ import logging
 import math
 import multiprocessing
 import os
-import sys
 import shutil
 import tempfile
 import threading
@@ -985,7 +984,8 @@ def calculate_rhab(
             nohab_raster_path = os.path.join(tmp_working_dir, 'nohab.tif')
             local_clip_stack = []
             for hab_raster_path in habitat_raster_path_map['nohab']:
-                basename = os.path.basename(os.path.splitext(hab_raster_path)[0])
+                basename = os.path.basename(
+                    os.path.splitext(hab_raster_path)[0])
                 local_clip_raster_path = os.path.join(
                     tmp_working_dir, f'{basename}.tif')
                 clip_and_reproject_raster(
@@ -1798,7 +1798,7 @@ def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
     """Use existing biophysical fields in `cv_risk_vector_path to calc total R.
 
     Args:
-        habitat_fieldname_list (list): list of habitat ids that can be used to index
+        habitat_fieldname_list (list): list of habitat ids used
 
         cv_risk_vector_path (str): path to point vector that has at least
             the following fields in it:
@@ -1954,9 +1954,9 @@ def calculate_habitat_value(
     pixel of habitat is for protection of the coastline.
 
     Parameters:
-        shore_sample_point_vector_path (str): path to CV analysis vector containing
-            at least the fields `Rt` and `Rt_nohab_[hab]` for all habitat
-            types under consideration.
+        shore_sample_point_vector_path (str): path to CV analysis vector
+            containing at least the fields `Rt` and `Rt_nohab_[hab]` for all
+            habitat types under consideration.
         scenario_config (configparser): scenario config with fields for
             habitat_map, lulc_raster_path, lulc_code_to_hab_map.
         results_dir (str): path to directory containing habitat back projection
@@ -2132,8 +2132,8 @@ def calculate_habitat_value(
                  (aligned_value_hab_raster_path_list[1], 1),
                  (numpy.array([[0]])),
                  (value_coverage_nodata, 'raw'), (hab_nodata, 'raw')],
-                intersect_raster_op, habitat_value_raster_path, gdal.GDT_Float32,
-                value_coverage_nodata)
+                intersect_raster_op, habitat_value_raster_path,
+                gdal.GDT_Float32, value_coverage_nodata)
         else:
             aligned_value_hab_raster_path_list = align_raster_list(
                 [value_coverage_raster_path, local_hab_raster_path,
@@ -2144,8 +2144,8 @@ def calculate_habitat_value(
                  (aligned_value_hab_raster_path_list[1], 1),
                  (aligned_value_hab_raster_path_list[2], 1),
                  (value_coverage_nodata, 'raw'), (hab_nodata, 'raw')],
-                intersect_raster_op, habitat_value_raster_path, gdal.GDT_Float32,
-                value_coverage_nodata)
+                intersect_raster_op, habitat_value_raster_path,
+                gdal.GDT_Float32, value_coverage_nodata)
 
     shore_sample_point_vector = None
     shore_sample_point_layer = None
@@ -2305,7 +2305,6 @@ def calculate_degree_cell_cv(
     cv_grid_worker_list = []
     grid_workspace_dir = os.path.join(local_workspace_dir, 'grid_workspaces')
 
-
     shore_grid_vector = gdal.OpenEx(
         local_data_path_map['shore_grid_vector_path'], gdal.OF_VECTOR)
     shore_grid_layer = shore_grid_vector.GetLayer()
@@ -2331,7 +2330,7 @@ def calculate_degree_cell_cv(
         n_boxes += 1
 
     for worker_id in range(min(n_boxes+1, int(multiprocessing.cpu_count()))):
-        cv_grid_worker_thread = multiprocessing.Process( # threading.Thread(
+        cv_grid_worker_thread = multiprocessing.Process(
             target=cv_grid_worker,
             args=(
                 bb_work_queue,
