@@ -1995,6 +1995,7 @@ def calculate_habitat_value(
             local_clip_stack.append(local_clip_raster_path)
         merge_mask_list(local_clip_stack, nohab_raster_path)
 
+    hab_value_raster_path_list = []
     for key, hab_raster_path_list in habitat_raster_path_map.items():
         if key == NOHAB_ID:
             # already processed above
@@ -2136,8 +2137,21 @@ def calculate_habitat_value(
                 intersect_raster_op, habitat_value_raster_path,
                 gdal.GDT_Float32, value_coverage_nodata)
 
+        hab_value_raster_path_list.append(habitat_value_raster_path)
+
+    total_value_sum_raster_path = os.path.join(
+            results_dir, 'total_value_sum.tif' % hab_id)
+    geoprocessing.raster_calculator(
+        [(path, 1) for path in hab_value_raster_path_list],
+        _add_op, total_value_sum_raster_path, gdal.GDT_Float32,
+        value_coverage_nodata)
+
     shore_sample_point_vector = None
     shore_sample_point_layer = None
+
+
+def _add_op(*array_list):
+    return numpy.sum(array_list, axis=0)
 
 
 def intersect_raster_op(array_a, array_b, array_knockout, nodata_a, nodata_b):
