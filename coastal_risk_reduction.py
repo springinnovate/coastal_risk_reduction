@@ -245,7 +245,7 @@ def cv_grid_worker(
                 buffered_bounding_box_list, osr.SRS_WKT_WGS84_LAT_LONG,
                 utm_srs.ExportToWkt(), edge_samples=11)
 
-            # calculate (risk, dist) -> raster mask tuples given lulc map
+            # calculate (hab_id, risk, dist) -> raster mask tuples given lulc map
             # and a lookup of lulc to risk tuples
             habitat_raster_path_map = clip_and_mask_habitat(
                 risk_distance_lucode_map,
@@ -961,18 +961,18 @@ def calculate_rhab(
 
     for payload, hab_raster_path_list in (
                 habitat_raster_path_map.items()):
-        LOGGER.debug(f'**********{payload}')
+        LOGGER.debug(f'**********{payload} {hab_raster_path_list}')
         if isinstance(payload, tuple):
             (hab_id, risk_val, eff_dist) = payload
-        elif payload == 'nohab':
+        elif payload == NOHAB_ID:
             continue
         else:
             raise ValueError(f'unknown input "{hab_id}": "{payload}"')
         nohab_raster_path = None
-        if 'nohab' in habitat_raster_path_map:
+        if NOHAB_ID in habitat_raster_path_map:
             nohab_raster_path = os.path.join(tmp_working_dir, 'nohab.tif')
             local_clip_stack = []
-            for hab_raster_path in habitat_raster_path_map['nohab']:
+            for hab_raster_path in habitat_raster_path_map[NOHAB_ID]:
                 basename = os.path.basename(
                     os.path.splitext(hab_raster_path)[0])
                 local_clip_raster_path = os.path.join(
@@ -1980,10 +1980,10 @@ def calculate_habitat_value(
         osr.SRS_WKT_WGS84_LAT_LONG, target_pixel_size, results_dir)
 
     nohab_raster_path = None
-    if 'nohab' in habitat_raster_path_map:
+    if NOHAB_ID in habitat_raster_path_map:
         nohab_raster_path = os.path.join(temp_workspace_dir, 'nohab.tif')
         local_clip_stack = []
-        for hab_raster_path in habitat_raster_path_map['nohab']:
+        for hab_raster_path in habitat_raster_path_map[NOHAB_ID]:
             basename = os.path.basename(os.path.splitext(hab_raster_path)[0])
             local_clip_raster_path = os.path.join(
                 temp_workspace_dir, f'{basename}.tif')
@@ -1996,7 +1996,7 @@ def calculate_habitat_value(
         merge_mask_list(local_clip_stack, nohab_raster_path)
 
     for key, hab_raster_path_list in habitat_raster_path_map.items():
-        if key == 'nohab':
+        if key == NOHAB_ID:
             # already processed above
             continue
         (hab_id, risk, protective_distance) = key
@@ -2200,7 +2200,7 @@ def clip_and_mask_habitat(
     to process for CV.
 
     Args:
-        risk_dist_lucode_map (dict): dictionary that maps (risk, dist)
+        risk_dist_lucode_map (dict): dictionary that maps (hab_id, risk, dist)
             tuples to a list of landcover codes that match
             ``lulc_raster_path``.
         lulc_raster_path (str): path to landcover raster with codes that are
@@ -2232,36 +2232,27 @@ def clip_and_mask_habitat(
     reclassify_threads = []
     habitat_raster_risk_map = collections.defaultdict(list)
     LOGGER.debug(f'risk dist lucode tuple: {risk_dist_lucode_map}')
-    for risk_distance_tuple, risk_lucodes in risk_dist_lucode_map.items():
+    for hab_id_risk_distance_tuple, risk_lucodes in risk_dist_lucode_map.items():
         reclass_map = {
             val: 1 for val in risk_lucodes
         }
-        risk_distance_mask_path = os.path.join(
-            workspace_dir, f'{risk_distance_tuple}_mask.tif')
-
-        # geoprocessing.reclassify_raster(
-        #         (local_lulc_path, 1), reclass_map,
-        #         risk_distance_mask_path, gdal.GDT_Byte, 0,
-        #         values_required=False)
+        lulc_risk_distance_mask_path = os.path.join(
+            workspace_dir, f'lulc_{hab_id_risk_distance_tuple}_mask.tif')
 
         reclassify_thread = threading.Thread(
             target=geoprocessing.reclassify_raster,
             args=(
                 (local_lulc_path, 1), reclass_map,
-                risk_distance_mask_path, gdal.GDT_Byte, 0),
+                lulc_risk_distance_mask_path, gdal.GDT_Byte, 0),
             daemon=True)
         reclassify_thread.start()
         reclassify_threads.append(reclassify_thread)
-        if risk_distance_tuple == 'nohab':
-            habitat_raster_risk_map['nohab'].append(risk_distance_mask_path)
-        else:
-            habitat_raster_risk_map[(
-                f'lulc_{risk_distance_tuple[0]}_{risk_distance_tuple[1]}',) +
-                risk_distance_tuple].append(risk_distance_mask_path)
+        habitat_raster_risk_map[hab_id_risk_distance_tuple].append(
+            lulc_risk_distance_mask_path)
 
     LOGGER.debug(risk_dist_raster_map)
-    for (hab_id, risk, dist), mask_path in risk_dist_raster_map.items():
-        habitat_raster_risk_map[(hab_id, risk, dist)].append(mask_path)
+    for hab_id_risk_distance_tuple, mask_path in risk_dist_raster_map.items():
+        habitat_raster_risk_map[hab_id_risk_distance_tuple].extend(mask_path)
 
     for reclassify_thread in reclassify_threads:
         reclassify_thread.join()
@@ -2404,7 +2395,7 @@ def calculate_degree_cell_cv(
         bb_work_queue.put((index, boundary_box.bounds))
         n_boxes += 1
 
-    for worker_id in range(min(n_boxes+1, int(multiprocessing.cpu_count()))):
+    for worker_id in range(min(1, n_boxes+1, int(multiprocessing.cpu_count()))):
         cv_grid_worker_thread = multiprocessing.Process(
             target=cv_grid_worker,
             args=(
@@ -2435,9 +2426,10 @@ def calculate_degree_cell_cv(
 
     for key in risk_dist_raster_map:
         LOGGER.debug(key)
-        if key == 'nohab':
+        if key == NOHAB_ID:
             continue
-        habitat_fieldname_list.append(f'lulc_{key[0]}_{key[1]}')
+        # first element is the hab id
+        habitat_fieldname_list.append(key[0])
 
     for cv_grid_worker_thread in cv_grid_worker_list:
         cv_grid_worker_thread.join()
@@ -2447,7 +2439,8 @@ def calculate_degree_cell_cv(
     merge_cv_points_thread.join()
 
     LOGGER.debug('calculate cv vector risk')
-    add_cv_vector_risk(habitat_fieldname_list, target_cv_vector_path)
+    add_cv_vector_risk(
+        list(set(habitat_fieldname_list)), target_cv_vector_path)
 
 
 def _process_scenario_ini(scenario_config_path):
@@ -2488,10 +2481,14 @@ def _process_scenario_ini(scenario_config_path):
                     f'expected a file from "{key}" at "{possible_path}" '
                     f'but file not found')
 
-    for _, _, hab_path in eval(scenario_config[HABITAT_MAP_KEY]).values():
-        if not os.path.exists(hab_path):
-            raise ValueError(
-                f'expected a habitat raster at "{hab_path}" but one not found')
+    for _, _, hab_path_list in eval(scenario_config[HABITAT_MAP_KEY]).values():
+        if not isinstance(hab_path_list, list):
+            hab_path_list = [hab_path_list]
+        for hab_path in hab_path_list:
+            if not os.path.exists(hab_path):
+                raise ValueError(
+                    f'expected a habitat raster at "{hab_path}" but one '
+                    f'not found')
 
     return scenario_config, scenario_id
 
@@ -2510,7 +2507,7 @@ def _parse_habitat_map(habitat_raster_path_map):
 
 
 def _parse_lulc_code_to_hab(lulc_code_to_hab_map):
-    # map a set of (risk, dist) tuples to lists of landcover codes that
+    # map a set of (hab_id, risk, dist) tuples to lists of landcover codes that
     # match them
     risk_distance_lucode_map = collections.defaultdict(list)
     for lucode, id_risk_dist_tuple in lulc_code_to_hab_map.items():
@@ -2519,7 +2516,7 @@ def _parse_lulc_code_to_hab(lulc_code_to_hab_map):
                 isinstance(id_risk_dist_tuple[0], str) and
                 isinstance(id_risk_dist_tuple[1], Number) and
                 isinstance(id_risk_dist_tuple[2], Number)) and (
-                    id_risk_dist_tuple != 'nohab'):
+                    id_risk_dist_tuple != NOHAB_ID):
             raise ValueError(
                 f'expected only (hab_id, risk number, dist number) tuples or '
                 f'"nohab" but got this value instead "{id_risk_dist_tuple}", '
