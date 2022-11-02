@@ -2140,7 +2140,7 @@ def calculate_habitat_value(
         hab_value_raster_path_list.append(habitat_value_raster_path)
 
     total_value_sum_raster_path = os.path.join(
-            results_dir, 'total_value_sum.tif' % hab_id)
+        results_dir, 'total_value_sum.tif')
     geoprocessing.raster_calculator(
         [(path, 1) for path in hab_value_raster_path_list],
         _add_op, total_value_sum_raster_path, gdal.GDT_Float32,
