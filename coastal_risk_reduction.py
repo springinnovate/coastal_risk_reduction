@@ -13,6 +13,7 @@ import os
 import shutil
 import tempfile
 import threading
+from numbers import Number
 
 from ecoshard import geoprocessing
 from ecoshard import taskgraph
@@ -2502,9 +2503,13 @@ def _process_scenario_ini(scenario_config_path):
 def _parse_habitat_map(habitat_raster_path_map):
     risk_dist_raster_map = collections.defaultdict(list)
     for hab_id, risk_dist_path_tuple in habitat_raster_path_map.items():
+        hab_list = risk_dist_path_tuple[2]
+        if isinstance(hab_list, str):
+            hab_list = [hab_list]
         risk_dist_raster_map[
-            (hab_id, risk_dist_path_tuple[0], risk_dist_path_tuple[1])] = \
-                risk_dist_path_tuple[2]
+            (hab_id, risk_dist_path_tuple[0], risk_dist_path_tuple[1])] = (
+                hab_list)
+
     return risk_dist_raster_map
 
 
@@ -2512,18 +2517,18 @@ def _parse_lulc_code_to_hab(lulc_code_to_hab_map):
     # map a set of (risk, dist) tuples to lists of landcover codes that
     # match them
     risk_distance_lucode_map = collections.defaultdict(list)
-    for lucode, risk_dist_tuple in lulc_code_to_hab_map.items():
-        if isinstance(risk_dist_tuple, tuple) and risk_dist_tuple[1] is None:
-            # this is the way we specify a "blank" landcover code
-            # just ignore
-            continue
-        if (not isinstance(risk_dist_tuple, tuple)
-                and risk_dist_tuple != 'nohab'):
+    for lucode, id_risk_dist_tuple in lulc_code_to_hab_map.items():
+        if not (isinstance(id_risk_dist_tuple, tuple) and
+                len(id_risk_dist_tuple) == 3 and
+                isinstance(id_risk_dist_tuple[0], str) and
+                isinstance(id_risk_dist_tuple[1], Number) and
+                isinstance(id_risk_dist_tuple[2], Number)) and (
+                    id_risk_dist_tuple != 'nohab'):
             raise ValueError(
-                f'expected only tuples or "nohab" but got this value instead '
-                f'could it be that it is quoted as a string? '
-                f'"{risk_dist_tuple}"')
-        risk_distance_lucode_map[risk_dist_tuple].append(lucode)
+                f'expected only (hab_id, risk number, dist number) tuples or '
+                f'"nohab" but got this value instead "{id_risk_dist_tuple}", '
+                f'could it be that it is quoted as a string on accident?')
+        risk_distance_lucode_map[id_risk_dist_tuple].append(lucode)
     return risk_distance_lucode_map
 
 
