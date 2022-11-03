@@ -1701,7 +1701,7 @@ def unmask_raster(base_raster_path, unmask_raster_path, target_raster_path):
 
     def knockout_masks_op(base, unmask):
         result = base.copy()
-        result[unmask] = 0
+        result[unmask == 1] = 0
         return result
 
     geoprocessing.raster_calculator(
