@@ -2071,10 +2071,11 @@ def calculate_habitat_value(
             buffer_point_feature = ogr.Feature(buffer_habitat_layer_defn)
             buffer_point_feature.SetGeometry(buffer_poly_geom)
 
-            buffer_point_feature.SetField(
-                habitat_service_id,
-                point_feature.GetField(habitat_service_id))
-            buffer_habitat_layer.CreateFeature(buffer_point_feature)
+            point_hab_service_val = point_feature.GetField(habitat_service_id)
+            if point_hab_service_val > 0:
+                buffer_point_feature.SetField(
+                    habitat_service_id, point_hab_service_val)
+                buffer_habitat_layer.CreateFeature(buffer_point_feature)
             buffer_point_feature = None
             point_feature = None
             buffer_poly_geom = None
