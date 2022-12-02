@@ -337,8 +337,7 @@ def cv_grid_worker(
 
         except Exception:
             LOGGER.exception('error on %s, removing workspace', payload)
-            raise
-            #retrying_rmtree(workspace_dir)
+            retrying_rmtree(workspace_dir)
 
 
 def make_shore_kernel(kernel_path):
@@ -2414,7 +2413,7 @@ def calculate_degree_cell_cv(
         bb_work_queue.put((index, boundary_box.bounds))
         n_boxes += 1
 
-    for worker_id in range(1): #range(min(n_boxes+1, int(multiprocessing.cpu_count()))):
+    for worker_id in range(min(n_boxes+1, int(multiprocessing.cpu_count()))):
         cv_grid_worker_thread = multiprocessing.Process(
             target=cv_grid_worker,
             args=(
