@@ -337,7 +337,8 @@ def cv_grid_worker(
 
         except Exception:
             LOGGER.exception('error on %s, removing workspace', payload)
-            retrying_rmtree(workspace_dir)
+            raise
+            #retrying_rmtree(workspace_dir)
 
 
 def make_shore_kernel(kernel_path):
@@ -1508,7 +1509,10 @@ def create_averaging_kernel_raster(
     driver = gdal.GetDriverByName('GTiff')
     kernel_raster = driver.Create(
         kernel_filepath, int(2*radius_in_pixels[0]),
-        int(2*radius_in_pixels[1]), 1, gdal.GDT_Float32)
+        int(2*radius_in_pixels[1]), 1, gdal.GDT_Float32,
+        options=(
+            'TILED=YES', 'BIGTIFF=YES', 'COMPRESS=LZW',
+            'BLOCKXSIZE=256', 'BLOCKYSIZE=256', 'NUM_THREADS=ALL_CPUS'))
 
     # Make some kind of geotransform, it doesn't matter what but
     # will make GIS libraries behave better if it's all defined
@@ -2410,7 +2414,7 @@ def calculate_degree_cell_cv(
         bb_work_queue.put((index, boundary_box.bounds))
         n_boxes += 1
 
-    for worker_id in range(min(n_boxes+1, int(multiprocessing.cpu_count()))):
+    for worker_id in range(1): #range(min(n_boxes+1, int(multiprocessing.cpu_count()))):
         cv_grid_worker_thread = multiprocessing.Process(
             target=cv_grid_worker,
             args=(
