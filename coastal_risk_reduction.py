@@ -11,7 +11,9 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import threading
+import types
 from numbers import Number
 
 from ecoshard import geoprocessing
@@ -119,7 +121,10 @@ def build_strtree(vector_path):
             r tree.
 
     Returns:
-        strtree.STRtree object that will return shapely geometry objects
+        strtree.STRtree object that will return indexes to object list
+            based on spatial queries.
+        feature_object_list, indexed by same index of STR query indexing
+            into object list of objects
             with a .prep field that is prepared geomtry for fast testing,
             a .geom field that is the base gdal geometry, and a field_val_map
             field that contains the 'fieldname'->value pairs from the original
@@ -138,23 +143,26 @@ def build_strtree(vector_path):
         field_name_type_list.append((field_name, field_type))
 
     LOGGER.debug('loop through features for rtree')
+    object_list = []
     for index, feature in enumerate(layer):
         feature_geom = feature.GetGeometryRef().Clone()
         feature_geom_shapely = shapely.wkb.loads(
             bytes(feature_geom.ExportToWkb()))
-        feature_geom_shapely.prep = shapely.prepared.prep(feature_geom_shapely)
-        feature_geom_shapely.geom = feature_geom
-        feature_geom_shapely.id = index
-        feature_geom_shapely.field_val_map = {}
+        feature_object = types.SimpleNamespace()
+        feature_object.prep = shapely.prepared.prep(feature_geom_shapely)
+        feature_object.geom = feature_geom
+        feature_object.id = index
+        feature_object.field_val_map = {}
         for field_name, _ in field_name_type_list:
-            feature_geom_shapely.field_val_map[field_name] = (
+            feature_object.field_val_map[field_name] = (
                 feature.GetField(field_name))
         geometry_prep_list.append(feature_geom_shapely)
+        object_list.append(feature_object)
     LOGGER.debug('constructing the tree')
     r_tree = shapely.strtree.STRtree(geometry_prep_list)
     LOGGER.debug('all done')
     r_tree.field_name_type_list = field_name_type_list
-    return r_tree
+    return r_tree, object_list
 
 
 def cv_grid_worker(
@@ -197,8 +205,8 @@ def cv_grid_worker(
     landmass_strtree_thread.start()
     wwiii_rtree_thread.start()
 
-    geomorphology_strtree = geomorphology_strtree_thread.join()
-    landmass_strtree = landmass_strtree_thread.join()
+    geomorphology_strtree, geomorphology_object_list = geomorphology_strtree_thread.join()
+    landmass_strtree, landmass_object_list = landmass_strtree_thread.join()
     wwiii_rtree = wwiii_rtree_thread.join()
 
     geomorphology_proj_wkt = geoprocessing.get_vector_info(
@@ -262,6 +270,7 @@ def cv_grid_worker(
             clip_geometry(
                 bounding_box_list, wgs84_srs, utm_srs,
                 ogr.wkbMultiLineString, geomorphology_strtree,
+                geomorphology_object_list,
                 local_geomorphology_vector_path)
 
             shore_point_vector_path = os.path.join(
@@ -275,6 +284,7 @@ def cv_grid_worker(
             clip_geometry(
                 buffered_bounding_box_list, wgs84_srs, utm_srs,
                 ogr.wkbPolygon, landmass_strtree,
+                landmass_object_list,
                 local_landmass_vector_path)
 
             landmass_boundary_vector_path = os.path.join(
@@ -1104,7 +1114,7 @@ def calculate_utm_srs(lng, lat):
 
 def clip_geometry(
         bounding_box_coords, base_srs, target_srs, ogr_geometry_type,
-        global_geom_strtree, target_vector_path):
+        global_geom_strtree, strtree_object_list, target_vector_path):
     """Clip geometry in `global_geom_strtree` to bounding box.
 
     Parameters:
@@ -1116,7 +1126,9 @@ def clip_geometry(
         ogr_geometry_type (ogr.wkb[TYPE]): geometry type to create for the
             target vector.
         global_geom_strtree (shapely.strtree.STRtree): an rtree loaded with
-            geometry to query via bounding box. Each geometry will contain
+            geometry to query via bounding box.
+        strtree_object_list (list): list of objects that are indexed by result
+            of strtree query. Each object will contain
             parameters `field_val_map` and `prep` that have values to copy to
             `target_fieldname` and used to quickly query geometry. Main object
             will have `field_name_type_list` field used to describe the
@@ -1144,7 +1156,9 @@ def clip_geometry(
         base_srs, target_srs)
 
     bounding_box = shapely.geometry.box(*bounding_box_coords)
-    possible_geom_list = global_geom_strtree.query(bounding_box)
+    possible_geom_list = [
+        strtree_object_list(index) for index in
+        global_geom_strtree.query(bounding_box)]
     if not possible_geom_list:
         layer = None
         vector = None
@@ -2283,45 +2297,12 @@ def clip_and_mask_habitat(
 def _clip_vector(
         base_vector_path, target_vector_path, target_bb):
     """Clip base vector to target with the given bounding box."""
-    base_vector = ogr.Open(base_vector_path)
-    base_layer = base_vector.GetLayer()
-    base_layer_dfn = base_layer.GetLayerDefn()
-    basename = os.path.splitext(os.path.basename(base_vector_path))[0]
-    driver = ogr.GetDriverByName('GPKG')
-    vector = driver.CreateDataSource(target_vector_path)
-    target_layer = vector.CreateLayer(
-        basename, base_layer.GetSpatialRef(), base_layer.GetGeomType())
-
-    field_names = []
-    for fld_index in range(base_layer_dfn.GetFieldCount()):
-        original_field = base_layer_dfn.GetFieldDefn(fld_index)
-        field_name = original_field.GetName()
-        target_field = ogr.FieldDefn(
-            field_name, original_field.GetType())
-        target_layer.CreateField(target_field)
-        field_names.append(field_name)
-
-    filter_box = shapely.geometry.box(*target_bb)
-    base_layer.SetSpatialFilter(ogr.CreateGeometryFromWkt(filter_box.wkt))
-
-    target_layer.StartTransaction()
-    for base_feature in base_layer:
-        geom = base_feature.GetGeometryRef()
-
-        # Copy original_datasource's feature and set as new shapes feature
-        target_feature = ogr.Feature(target_layer.GetLayerDefn())
-        target_feature.SetGeometry(geom)
-
-        # For all the fields in the feature set the field values from the
-        # source field
-        for field_name in field_names:
-            target_feature.SetField(
-                field_name, base_feature.GetField(field_name))
-
-        target_layer.CreateFeature(target_feature)
-        target_feature = None
-        base_feature = None
-    target_layer.CommitTransaction()
+    start_time = time.time()
+    clip_options = gdal.VectorTranslateOptions(
+        format='GPKG', spatFilter=target_bb)
+    base_vector = gdal.OpenEx(base_vector_path, gdal.OF_VECTOR)
+    gdal.VectorTranslate(target_vector_path, base_vector, options=clip_options)
+    LOGGER.debug(f'{time.time()-start_time:.2f}s took this long')
 
 
 def calculate_degree_cell_cv(
@@ -2381,8 +2362,9 @@ def calculate_degree_cell_cv(
                 daemon=True,
                 target=_clip_vector,
                 args=(vector_path, clipped_vector_path, lulc_wgs84_bb))
+            LOGGER.debug(f'about to start {vector_id}')
             clip_thread.start()
-            worker_list.append(clip_thread)
+            worker_list.append((vector_id, clip_thread))
             local_data_path_map[vector_id] = clipped_vector_path
 
         for raster_id in ['slr_raster_path', 'dem_raster_path']:
@@ -2398,10 +2380,12 @@ def calculate_degree_cell_cv(
                     clipped_raster_path, 'near'),
                 kwargs={
                     'target_bb': lulc_wgs84_bb, 'working_dir': clipped_dir})
+            LOGGER.debug(f'about to start {raster_id}')
             clip_thread.start()
             local_data_path_map[raster_id] = clipped_raster_path
-            worker_list.append(clip_thread)
-        for worker_thread in worker_list:
+            worker_list.append((raster_id, clip_thread))
+        for worker_id, worker_thread in worker_list:
+            LOGGER.debug(f'waiting for {worker_id} to finish')
             worker_thread.join()
 
     n_boxes = 0
