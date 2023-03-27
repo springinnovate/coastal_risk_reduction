@@ -9,6 +9,7 @@ import math
 import multiprocessing
 import os
 import shutil
+import sys
 import tempfile
 import threading
 from numbers import Number
@@ -41,6 +42,7 @@ TARGET_NODATA = -1
 
 logging.basicConfig(
     level=logging.DEBUG,
+    stream=sys.stdout,
     format=(
         '%(asctime)s (%(relativeCreated)d) %(levelname)s %(name)s'
         ' [%(pathname)s.%(funcName)s:%(lineno)d] %(message)s'))
