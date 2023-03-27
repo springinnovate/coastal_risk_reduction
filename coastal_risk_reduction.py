@@ -104,7 +104,6 @@ def build_rtree(vector_path):
             feature_geom.GetEnvelope()[i]
             for i in envelope_to_shapely_swizzle]
         bounds = shapely.box(*bound_list)
-        LOGGER.debug(f'{feature_geom.ExportToWkt()}, {bounds}')
         field_val_map = {}
         for field_name, _ in field_name_type_list:
             field_val_map[field_name] = (
