@@ -95,17 +95,22 @@ def build_rtree(vector_path):
         field_type = layer_defn.GetFieldDefn(index).GetType()
         field_name_type_list.append((field_name, field_type))
 
+    envelope_to_shapely_swizzle = [0, 2, 1, 3]
+
     LOGGER.debug('loop through features for rtree')
     for index, feature in enumerate(layer):
-        feature_geom = feature.GetGeometryRef().Clone()
-        feature_geom_shapely = shapely.wkb.loads(
-            bytes(feature_geom.ExportToWkb()))
+        feature_geom = feature.GetGeometryRef()
+        bound_list = [
+            feature_geom.GetEnvelope()[i]
+            for i in envelope_to_shapely_swizzle]
+        bounds = shapely.box(*bound_list)
+        LOGGER.debug(f'{feature_geom.ExportToWkt()}, {bounds}')
         field_val_map = {}
         for field_name, _ in field_name_type_list:
             field_val_map[field_name] = (
                 feature.GetField(field_name))
         geometry_prep_list.append(
-            (index, feature_geom_shapely.bounds, field_val_map))
+            (index, bounds, field_val_map))
     LOGGER.debug('constructing the tree')
     r_tree = rtree.index.Index(geometry_prep_list)
     LOGGER.debug('all done')
@@ -132,6 +137,7 @@ def build_strtree(vector_path):
             field which contains original fieldname/field type pairs
 
     """
+    start_time = time.time()
     geometry_prep_list = []
     vector = gdal.OpenEx(vector_path, gdal.OF_VECTOR)
     layer = vector.GetLayer()
@@ -158,9 +164,9 @@ def build_strtree(vector_path):
                 feature.GetField(field_name))
         geometry_prep_list.append(feature_geom_shapely)
         object_list.append(feature_object)
-    LOGGER.debug('constructing the tree')
+    LOGGER.debug(f'constructing the tree for {vector_path}')
     r_tree = shapely.strtree.STRtree(geometry_prep_list)
-    LOGGER.debug('all done')
+    LOGGER.debug(f'constrcuted tree for {vector_path} in {time.time()-start_time:.2f}s')
     r_tree.field_name_type_list = field_name_type_list
     return r_tree, object_list
 
@@ -189,167 +195,173 @@ def cv_grid_worker(
         None.
 
     """
-    LOGGER.info('build geomorphology, landmass, and wwiii lookup')
+    try:
+        LOGGER.info('build geomorphology, landmass, and wwiii lookup')
 
-    geomorphology_strtree_thread = ThreadWithReturnValue(
-        target=build_strtree,
-        args=(local_data_path_map['geomorphology_vector_path'],))
-    landmass_strtree_thread = ThreadWithReturnValue(
-        target=build_strtree,
-        args=(local_data_path_map['landmass_vector_path'],))
-    wwiii_rtree_thread = ThreadWithReturnValue(
-        target=build_rtree,
-        args=(local_data_path_map['wwiii_vector_path'],))
+        geomorphology_strtree_thread = ThreadWithReturnValue(
+            target=build_strtree,
+            args=(local_data_path_map['geomorphology_vector_path'],))
+        landmass_strtree_thread = ThreadWithReturnValue(
+            target=build_strtree,
+            args=(local_data_path_map['landmass_vector_path'],))
+        wwiii_rtree_thread = ThreadWithReturnValue(
+            target=build_rtree,
+            args=(local_data_path_map['wwiii_vector_path'],))
 
-    geomorphology_strtree_thread.start()
-    landmass_strtree_thread.start()
-    wwiii_rtree_thread.start()
+        geomorphology_strtree_thread.start()
+        landmass_strtree_thread.start()
+        wwiii_rtree_thread.start()
 
-    geomorphology_strtree, geomorphology_object_list = geomorphology_strtree_thread.join()
-    landmass_strtree, landmass_object_list = landmass_strtree_thread.join()
-    wwiii_rtree = wwiii_rtree_thread.join()
+        geomorphology_strtree, geomorphology_object_list = geomorphology_strtree_thread.join()
+        landmass_strtree, landmass_object_list = landmass_strtree_thread.join()
+        wwiii_rtree = wwiii_rtree_thread.join()
 
-    geomorphology_proj_wkt = geoprocessing.get_vector_info(
-        local_data_path_map['geomorphology_vector_path'])['projection_wkt']
-    gegeomorphology_proj = osr.SpatialReference()
-    gegeomorphology_proj.ImportFromWkt(geomorphology_proj_wkt)
+        geomorphology_proj_wkt = geoprocessing.get_vector_info(
+            local_data_path_map['geomorphology_vector_path'])['projection_wkt']
+        gegeomorphology_proj = osr.SpatialReference()
+        gegeomorphology_proj.ImportFromWkt(geomorphology_proj_wkt)
 
-    shore_point_sample_distance = float(local_data_path_map[
-        'shore_point_sample_distance'])
-    target_pixel_size = [
-        shore_point_sample_distance / 4, -shore_point_sample_distance / 4]
+        shore_point_sample_distance = float(local_data_path_map[
+            'shore_point_sample_distance'])
+        target_pixel_size = [
+            shore_point_sample_distance / 4, -shore_point_sample_distance / 4]
 
-    risk_distance_lucode_map = _parse_lulc_code_to_hab(eval(
-        local_data_path_map['lulc_code_to_hab_map']))
+        risk_distance_lucode_map = _parse_lulc_code_to_hab(eval(
+            local_data_path_map['lulc_code_to_hab_map']))
 
-    risk_dist_raster_map = _parse_habitat_map(eval(
-        local_data_path_map['habitat_map']))
+        risk_dist_raster_map = _parse_habitat_map(eval(
+            local_data_path_map['habitat_map']))
 
-    while True:
-        try:
-            payload = bb_work_queue.get()
-            if payload == STOP_SENTINEL:
-                LOGGER.debug('stopping')
-                # put it back so others can stop
-                bb_work_queue.put(STOP_SENTINEL)
-                break
-            else:
-                LOGGER.debug('running')
-            # otherwise payload is the bounding box
-            index, (lng_min, lat_min, lng_max, lat_max) = payload
-            bounding_box_list = [lng_min, lat_min, lng_max, lat_max]
-            buffered_bounding_box_list = [
-                lng_min-0.1, lat_min-0.1, lng_max+0.1, lat_max+0.1]
-            # create workspace
-            workspace_dir = os.path.join(
-                grid_workspace_dir, '%d_%s_%s_%s_%s' % (
-                    index, lng_min, lat_min, lng_max, lat_max))
-            os.makedirs(workspace_dir, exist_ok=True)
+        while True:
+            try:
+                LOGGER.info('waiting for work payload')
+                payload = bb_work_queue.get()
+                LOGGER.info(f'processing payload {payload}')
+                if payload == STOP_SENTINEL:
+                    LOGGER.debug('stopping')
+                    # put it back so others can stop
+                    bb_work_queue.put(STOP_SENTINEL)
+                    break
+                else:
+                    LOGGER.debug('running')
+                # otherwise payload is the bounding box
+                index, (lng_min, lat_min, lng_max, lat_max) = payload
+                bounding_box_list = [lng_min, lat_min, lng_max, lat_max]
+                buffered_bounding_box_list = [
+                    lng_min-0.1, lat_min-0.1, lng_max+0.1, lat_max+0.1]
+                # create workspace
+                workspace_dir = os.path.join(
+                    grid_workspace_dir, '%d_%s_%s_%s_%s' % (
+                        index, lng_min, lat_min, lng_max, lat_max))
+                os.makedirs(workspace_dir, exist_ok=True)
 
-            utm_srs = calculate_utm_srs(
-                (lng_min+lng_max)/2, (lat_min+lat_max)/2)
-            wgs84_srs = osr.SpatialReference()
-            wgs84_srs.ImportFromWkt(osr.SRS_WKT_WGS84_LAT_LONG)
+                utm_srs = calculate_utm_srs(
+                    (lng_min+lng_max)/2, (lat_min+lat_max)/2)
+                wgs84_srs = osr.SpatialReference()
+                wgs84_srs.ImportFromWkt(osr.SRS_WKT_WGS84_LAT_LONG)
 
-            local_bounding_box = geoprocessing.transform_bounding_box(
-                buffered_bounding_box_list, osr.SRS_WKT_WGS84_LAT_LONG,
-                utm_srs.ExportToWkt(), edge_samples=11)
+                local_bounding_box = geoprocessing.transform_bounding_box(
+                    buffered_bounding_box_list, osr.SRS_WKT_WGS84_LAT_LONG,
+                    utm_srs.ExportToWkt(), edge_samples=11)
 
-            # calculate (hab_id, risk, dist) -> raster mask tuples given lulc map
-            # and a lookup of lulc to risk tuples
-            habitat_raster_path_map = clip_and_mask_habitat(
-                risk_distance_lucode_map,
-                local_data_path_map['lulc_raster_path'],
-                risk_dist_raster_map, local_bounding_box,
-                utm_srs.ExportToWkt(), target_pixel_size, workspace_dir)
+                # calculate (hab_id, risk, dist) -> raster mask tuples given lulc map
+                # and a lookup of lulc to risk tuples
+                habitat_raster_path_map = clip_and_mask_habitat(
+                    risk_distance_lucode_map,
+                    local_data_path_map['lulc_raster_path'],
+                    risk_dist_raster_map, local_bounding_box,
+                    utm_srs.ExportToWkt(), target_pixel_size, workspace_dir)
 
-            LOGGER.debug(habitat_raster_path_map)
+                LOGGER.debug(habitat_raster_path_map)
 
-            local_geomorphology_vector_path = os.path.join(
-                workspace_dir, 'geomorphology.gpkg')
-            clip_geometry(
-                bounding_box_list, wgs84_srs, utm_srs,
-                ogr.wkbMultiLineString, geomorphology_strtree,
-                geomorphology_object_list,
-                local_geomorphology_vector_path)
+                local_geomorphology_vector_path = os.path.join(
+                    workspace_dir, 'geomorphology.gpkg')
+                clip_geometry(
+                    bounding_box_list, wgs84_srs, utm_srs,
+                    ogr.wkbMultiLineString, geomorphology_strtree,
+                    geomorphology_object_list,
+                    local_geomorphology_vector_path)
 
-            shore_point_vector_path = os.path.join(
-                workspace_dir, 'shore_points.gpkg')
-            sample_line_to_points(
-                local_geomorphology_vector_path, shore_point_vector_path,
-                shore_point_sample_distance)
+                shore_point_vector_path = os.path.join(
+                    workspace_dir, 'shore_points.gpkg')
+                sample_line_to_points(
+                    local_geomorphology_vector_path, shore_point_vector_path,
+                    shore_point_sample_distance)
 
-            local_landmass_vector_path = os.path.join(
-                workspace_dir, 'landmass.gpkg')
-            clip_geometry(
-                buffered_bounding_box_list, wgs84_srs, utm_srs,
-                ogr.wkbPolygon, landmass_strtree,
-                landmass_object_list,
-                local_landmass_vector_path)
+                local_landmass_vector_path = os.path.join(
+                    workspace_dir, 'landmass.gpkg')
+                clip_geometry(
+                    buffered_bounding_box_list, wgs84_srs, utm_srs,
+                    ogr.wkbPolygon, landmass_strtree,
+                    landmass_object_list,
+                    local_landmass_vector_path)
 
-            landmass_boundary_vector_path = os.path.join(
-                workspace_dir, 'landmass_boundary.gpkg')
-            vector_to_lines(
-                local_landmass_vector_path, landmass_boundary_vector_path)
+                landmass_boundary_vector_path = os.path.join(
+                    workspace_dir, 'landmass_boundary.gpkg')
+                vector_to_lines(
+                    local_landmass_vector_path, landmass_boundary_vector_path)
 
-            local_dem_path = os.path.join(
-                workspace_dir, 'dem.tif')
-            clip_and_reproject_raster(
-                local_data_path_map['dem_raster_path'], local_dem_path,
-                utm_srs.ExportToWkt(), bounding_box_list,
-                float(local_data_path_map['relief_sample_distance']),
-                'bilinear', True, target_pixel_size)
+                local_dem_path = os.path.join(
+                    workspace_dir, 'dem.tif')
+                clip_and_reproject_raster(
+                    local_data_path_map['dem_raster_path'], local_dem_path,
+                    utm_srs.ExportToWkt(), bounding_box_list,
+                    float(local_data_path_map['relief_sample_distance']),
+                    'bilinear', True, target_pixel_size)
 
-            local_slr_path = os.path.join(
-                workspace_dir, 'slr.tif')
-            clip_and_reproject_raster(
-                local_data_path_map['slr_raster_path'], local_slr_path,
-                utm_srs.ExportToWkt(), bounding_box_list, 0, 'bilinear', True,
-                target_pixel_size)
+                local_slr_path = os.path.join(
+                    workspace_dir, 'slr.tif')
+                clip_and_reproject_raster(
+                    local_data_path_map['slr_raster_path'], local_slr_path,
+                    utm_srs.ExportToWkt(), bounding_box_list, 0, 'bilinear', True,
+                    target_pixel_size)
 
-            # Rrelief
-            LOGGER.info('calculate relief on %s', workspace_dir)
-            calculate_relief(
-                shore_point_vector_path,
-                float(local_data_path_map['relief_sample_distance']),
-                local_dem_path, 'relief')
-            LOGGER.info('calculate rhab on %s', workspace_dir)
-            # Rhab
-            calculate_rhab(
-                shore_point_vector_path, habitat_raster_path_map, 'Rhab',
-                target_pixel_size)
+                # Rrelief
+                LOGGER.info('calculate relief on %s', workspace_dir)
+                calculate_relief(
+                    shore_point_vector_path,
+                    float(local_data_path_map['relief_sample_distance']),
+                    local_dem_path, 'relief')
+                LOGGER.info('calculate rhab on %s', workspace_dir)
+                # Rhab
+                calculate_rhab(
+                    shore_point_vector_path, habitat_raster_path_map, 'Rhab',
+                    target_pixel_size)
 
-            # Rslr
-            calculate_slr(shore_point_vector_path, local_slr_path, 'slr')
+                # Rslr
+                calculate_slr(shore_point_vector_path, local_slr_path, 'slr')
 
-            # wind and wave power
-            calculate_wind_and_wave(
-                shore_point_vector_path,
-                shore_point_sample_distance,
-                local_landmass_vector_path,
-                landmass_boundary_vector_path,
-                local_dem_path, wwiii_rtree,
-                int(local_data_path_map['n_fetch_rays']),
-                float(local_data_path_map['max_fetch_distance']),
-                'rei', 'ew')
+                # wind and wave power
+                calculate_wind_and_wave(
+                    shore_point_vector_path,
+                    shore_point_sample_distance,
+                    local_landmass_vector_path,
+                    landmass_boundary_vector_path,
+                    local_dem_path, wwiii_rtree,
+                    int(local_data_path_map['n_fetch_rays']),
+                    float(local_data_path_map['max_fetch_distance']),
+                    'rei', 'ew')
 
-            # Rsurge
-            calculate_surge(
-                shore_point_vector_path, local_dem_path,
-                float(local_data_path_map['max_fetch_distance']), 'surge')
+                # Rsurge
+                calculate_surge(
+                    shore_point_vector_path, local_dem_path,
+                    float(local_data_path_map['max_fetch_distance']), 'surge')
 
-            # Rgeomorphology
-            calculate_geomorphology(
-                shore_point_vector_path, local_geomorphology_vector_path,
-                float(local_data_path_map['max_fetch_distance']),
-                'Rgeomorphology')
+                # Rgeomorphology
+                calculate_geomorphology(
+                    shore_point_vector_path, local_geomorphology_vector_path,
+                    float(local_data_path_map['max_fetch_distance']),
+                    'Rgeomorphology')
 
-            LOGGER.info('completed %s', shore_point_vector_path)
-            cv_point_complete_queue.put(shore_point_vector_path)
+                LOGGER.info('completed %s', shore_point_vector_path)
+                cv_point_complete_queue.put(shore_point_vector_path)
 
-        except Exception:
-            LOGGER.exception('error on %s, removing workspace', payload)
-            retrying_rmtree(workspace_dir)
+            except Exception:
+                LOGGER.exception('error on %s, removing workspace', payload)
+                retrying_rmtree(workspace_dir)
+    except Exception:
+        LOGGER.exception('something horrible happened on')
+        raise
 
 
 def make_shore_kernel(kernel_path):
@@ -1157,7 +1169,7 @@ def clip_geometry(
 
     bounding_box = shapely.geometry.box(*bounding_box_coords)
     possible_geom_list = [
-        strtree_object_list(index) for index in
+        strtree_object_list[index].geom for index in
         global_geom_strtree.query(bounding_box)]
     if not possible_geom_list:
         layer = None
@@ -2399,7 +2411,7 @@ def calculate_degree_cell_cv(
         bb_work_queue.put((index, boundary_box.bounds))
         n_boxes += 1
 
-    for worker_id in range(min(n_boxes+1, int(multiprocessing.cpu_count()))):
+    for worker_id in range(min(1, n_boxes+1, int(multiprocessing.cpu_count()))):
         cv_grid_worker_thread = multiprocessing.Process(
             target=cv_grid_worker,
             args=(
@@ -2557,6 +2569,7 @@ def main():
             os.makedirs(dir_path, exist_ok=True)
         target_cv_vector_path = os.path.join(
             local_workspace_dir, '%s.gpkg' % scenario_id)
+
         calculate_cv_vector_task = task_graph.add_task(
             func=calculate_degree_cell_cv,
             args=(
