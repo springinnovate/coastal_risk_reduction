@@ -77,12 +77,15 @@ class ThreadWithReturnValue(threading.Thread):
             raise
 
 
-def build_strtree(vector_path):
+def build_strtree(
+        vector_path, fields_to_copy=None):
     """Build an rtree that generates geom and preped geometry.
 
     Parameters:
         vector_path (str): path to vector of geometry to build into
             r tree.
+        fields_to_copy (list): if not None, only copy fields that contain
+            these substrings
 
     Returns:
         strtree.STRtree object that will return indexes to object list
@@ -103,10 +106,12 @@ def build_strtree(vector_path):
         layer = vector.GetLayer()
         layer_defn = layer.GetLayerDefn()
         field_name_type_list = []
-        for index in range(layer_defn.GetFieldCount()):
-            field_name = layer_defn.GetFieldDefn(index).GetName()
-            field_type = layer_defn.GetFieldDefn(index).GetType()
-            field_name_type_list.append((field_name, field_type))
+        if fields_to_copy is not None:
+            for index in range(layer_defn.GetFieldCount()):
+                field_name = layer_defn.GetFieldDefn(index).GetName()
+                if any([x in field_name for x in fields_to_copy]):
+                    field_type = layer_defn.GetFieldDefn(index).GetType()
+                    field_name_type_list.append((field_name, field_type))
 
         LOGGER.debug(f'loop through features for rtree {vector_path}')
         object_list = []
@@ -124,18 +129,20 @@ def build_strtree(vector_path):
             feature_object.prep = shapely.prepared.prep(feature_geom_shapely)
             feature_object.geom = feature_geom_shapely
             feature_object.id = index
-            feature_object.field_val_map = {
-                field_name: feature.GetField(field_name)
-                for field_name, _ in field_name_type_list
-            }
+            if fields_to_copy is not None:
+                feature_object.field_val_map = {
+                    field_name: feature.GetField(field_name)
+                    for field_name, _ in field_name_type_list
+                }
             geometry_prep_list.append(feature_geom_shapely)
             object_list.append(feature_object)
         LOGGER.debug(f'constructing the tree for {vector_path}')
-        r_tree = shapely.strtree.STRtree(geometry_prep_list)
+        str_tree = shapely.strtree.STRtree(geometry_prep_list)
         LOGGER.debug(
             f'constrcuted tree for {vector_path} in {time.time()-start_time:.2f}s')
-        r_tree.field_name_type_list = field_name_type_list
-        return r_tree, object_list
+        if fields_to_copy is not None:
+            str_tree.field_name_type_list = field_name_type_list
+        return str_tree, object_list
     except Exception:
         LOGGER.exception(
             f'something bad happened on building STR tree for {vector_path}')
@@ -173,13 +180,15 @@ def cv_grid_worker(
 
         geomorphology_strtree_thread = ThreadWithReturnValue(
             target=build_strtree,
-            args=(local_data_path_map['geomorphology_vector_path'],))
+            args=(local_data_path_map['geomorphology_vector_path'], ['Rgeo']))
         landmass_strtree_thread = ThreadWithReturnValue(
             target=build_strtree,
             args=(local_data_path_map['landmass_vector_path'],))
         wwiii_strtree_thread = ThreadWithReturnValue(
             target=build_strtree,
-            args=(local_data_path_map['wwiii_vector_path'],))
+            args=(local_data_path_map['wwiii_vector_path'],
+                  ['REI_PCT', 'REI_V', 'V10PCT_', 'REI_PCT', 'WavP_',
+                   'WavPPCT']))
 
         geomorphology_strtree_thread.start()
         landmass_strtree_thread.start()
