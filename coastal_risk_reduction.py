@@ -62,59 +62,73 @@ class ThreadWithReturnValue(threading.Thread):
         self._return = None
 
     def run(self):
-        if self._target is not None:
-            self._return = self._target(*self._args, **self._kwargs)
+        try:
+            if self._target is not None:
+                self._return = self._target(*self._args, **self._kwargs)
+        except Exception:
+            LOGGER.exception(f'exception when running thread')
+            raise
 
     def join(self, *args):
-        threading.Thread.join(self, *args)
-        return self._return
+        try:
+            threading.Thread.join(self, *args)
+            return self._return
+        except Exception:
+            LOGGER.exception(f'exception when joining thread')
+            raise
 
 
-def build_rtree(vector_path):
-    """Build an rtree that can be queried for nearest neighbors.
+# def build_rtree(vector_path):
+#     """Build an rtree that can be queried for nearest neighbors.
 
-    Parameters:
-        vector_path (str): path to vector of geometry to build into
-            r tree.
+#     Parameters:
+#         vector_path (str): path to vector of geometry to build into
+#             r tree.
 
-    Returns:
-        rtree.Index object that will return shapely geometry objects with
-            a field_val_map field that contains the 'fieldname'->value pairs
-            from the original vector. The main object will also have a
-            `field_name_type_list` field which contains original
-            fieldname/field type pairs
+#     Returns:
+#         rtree.Index object that will return shapely geometry objects with
+#             a field_val_map field that contains the 'fieldname'->value pairs
+#             from the original vector. The main object will also have a
+#             `field_name_type_list` field which contains original
+#             fieldname/field type pairs
 
-    """
-    geometry_prep_list = []
-    vector = gdal.OpenEx(vector_path, gdal.OF_VECTOR)
-    layer = vector.GetLayer()
-    layer_defn = layer.GetLayerDefn()
-    field_name_type_list = []
-    for index in range(layer_defn.GetFieldCount()):
-        field_name = layer_defn.GetFieldDefn(index).GetName()
-        field_type = layer_defn.GetFieldDefn(index).GetType()
-        field_name_type_list.append((field_name, field_type))
+#     """
+#     geometry_prep_list = []
+#     vector = gdal.OpenEx(vector_path, gdal.OF_VECTOR)
+#     layer = vector.GetLayer()
+#     layer_defn = layer.GetLayerDefn()
+#     field_name_type_list = []
+#     for index in range(layer_defn.GetFieldCount()):
+#         field_name = layer_defn.GetFieldDefn(index).GetName()
+#         field_type = layer_defn.GetFieldDefn(index).GetType()
+#         field_name_type_list.append((field_name, field_type))
 
-    envelope_to_shapely_swizzle = [0, 2, 1, 3]
+#     envelope_to_shapely_swizzle = [0, 2, 1, 3]
 
-    LOGGER.debug('loop through features for rtree')
-    for index, feature in enumerate(layer):
-        feature_geom = feature.GetGeometryRef()
-        bound_list = [
-            feature_geom.GetEnvelope()[i]
-            for i in envelope_to_shapely_swizzle]
-        bounds = shapely.box(*bound_list)
-        field_val_map = {}
-        for field_name, _ in field_name_type_list:
-            field_val_map[field_name] = (
-                feature.GetField(field_name))
-        geometry_prep_list.append(
-            (index, bounds, field_val_map))
-    LOGGER.debug('constructing the tree')
-    r_tree = rtree.index.Index(geometry_prep_list)
-    LOGGER.debug('all done')
-    r_tree.field_name_type_list = field_name_type_list
-    return r_tree
+#     LOGGER.debug('loop through features for rtree')
+#     n_features = layer.GetLayerCount()
+#     for index, feature in enumerate(layer):
+#         if index % 1000 == 0:
+#             LOGGER.debug(
+#                 f'{index/n_features*100:.1f}% complete '
+#                 f'{index+1}/{n_features}: {vector_path}')
+
+#         feature_geom = feature.GetGeometryRef()
+#         bound_list = [
+#             feature_geom.GetEnvelope()[i]
+#             for i in envelope_to_shapely_swizzle]
+#         bounds = shapely.box(*bound_list)
+#         field_val_map = {}
+#         for field_name, _ in field_name_type_list:
+#             field_val_map[field_name] = (
+#                 feature.GetField(field_name))
+#         geometry_prep_list.append(
+#             (index, bounds, field_val_map))
+#     LOGGER.debug('constructing the tree')
+#     r_tree = rtree.index.Index(geometry_prep_list)
+#     LOGGER.debug('all done')
+#     r_tree.field_name_type_list = field_name_type_list
+#     return r_tree
 
 
 def build_strtree(vector_path):
@@ -136,38 +150,52 @@ def build_strtree(vector_path):
             field which contains original fieldname/field type pairs
 
     """
-    start_time = time.time()
-    geometry_prep_list = []
-    vector = gdal.OpenEx(vector_path, gdal.OF_VECTOR)
-    layer = vector.GetLayer()
-    layer_defn = layer.GetLayerDefn()
-    field_name_type_list = []
-    for index in range(layer_defn.GetFieldCount()):
-        field_name = layer_defn.GetFieldDefn(index).GetName()
-        field_type = layer_defn.GetFieldDefn(index).GetType()
-        field_name_type_list.append((field_name, field_type))
+    try:
+        start_time = time.time()
+        geometry_prep_list = []
+        vector = gdal.OpenEx(vector_path, gdal.OF_VECTOR)
+        layer = vector.GetLayer()
+        layer_defn = layer.GetLayerDefn()
+        field_name_type_list = []
+        for index in range(layer_defn.GetFieldCount()):
+            field_name = layer_defn.GetFieldDefn(index).GetName()
+            field_type = layer_defn.GetFieldDefn(index).GetType()
+            field_name_type_list.append((field_name, field_type))
 
-    LOGGER.debug('loop through features for rtree')
-    object_list = []
-    for index, feature in enumerate(layer):
-        feature_geom = feature.GetGeometryRef().Clone()
-        feature_geom_shapely = shapely.wkb.loads(
-            bytes(feature_geom.ExportToWkb()))
-        feature_object = types.SimpleNamespace()
-        feature_object.prep = shapely.prepared.prep(feature_geom_shapely)
-        feature_object.geom = feature_geom
-        feature_object.id = index
-        feature_object.field_val_map = {}
-        for field_name, _ in field_name_type_list:
-            feature_object.field_val_map[field_name] = (
-                feature.GetField(field_name))
-        geometry_prep_list.append(feature_geom_shapely)
-        object_list.append(feature_object)
-    LOGGER.debug(f'constructing the tree for {vector_path}')
-    r_tree = shapely.strtree.STRtree(geometry_prep_list)
-    LOGGER.debug(f'constrcuted tree for {vector_path} in {time.time()-start_time:.2f}s')
-    r_tree.field_name_type_list = field_name_type_list
-    return r_tree, object_list
+        LOGGER.debug(f'loop through features for rtree {vector_path}')
+        object_list = []
+        n_features = layer.GetFeatureCount()
+        for index, feature in enumerate(layer):
+            if index % 1000 == 0:
+                LOGGER.debug(
+                    f'{index/n_features*100:.1f}% complete '
+                    f'{index+1}/{n_features}: {vector_path}')
+            feature_geom = feature.GetGeometryRef()
+            feature_geom_shapely = shapely.wkb.loads(
+                bytes(feature_geom.ExportToWkb()))
+            feature_geom = None
+            feature_object = types.SimpleNamespace()
+            feature_object.prep = shapely.prepared.prep(feature_geom_shapely)
+            feature_object.geom = feature_geom_shapely
+            feature_object.id = index
+            feature_object.field_val_map = {
+                field_name: feature.GetField(field_name)
+                for field_name, _ in field_name_type_list
+            }
+            geometry_prep_list.append(feature_geom_shapely)
+            object_list.append(feature_object)
+        LOGGER.debug(f'constructing the tree for {vector_path}')
+        r_tree = shapely.strtree.STRtree(geometry_prep_list)
+        LOGGER.debug(
+            f'constrcuted tree for {vector_path} in {time.time()-start_time:.2f}s')
+        r_tree.field_name_type_list = field_name_type_list
+        return r_tree, object_list
+    except Exception:
+        LOGGER.exception(
+            f'something bad happened on building STR tree for {vector_path}')
+        raise
+    finally:
+        LOGGER.info(f'all done for STRtree {vector_path}')
 
 
 def cv_grid_worker(
@@ -204,16 +232,20 @@ def cv_grid_worker(
             target=build_strtree,
             args=(local_data_path_map['landmass_vector_path'],))
         wwiii_rtree_thread = ThreadWithReturnValue(
-            target=build_rtree,
+            target=build_strtree,
             args=(local_data_path_map['wwiii_vector_path'],))
 
         geomorphology_strtree_thread.start()
         landmass_strtree_thread.start()
         wwiii_rtree_thread.start()
 
+        LOGGER.debug('waiting for geomorphology_strtree to finish')
         geomorphology_strtree, geomorphology_object_list = geomorphology_strtree_thread.join()
+        LOGGER.debug('waiting for landmass_strtree to finish')
         landmass_strtree, landmass_object_list = landmass_strtree_thread.join()
-        wwiii_rtree = wwiii_rtree_thread.join()
+        LOGGER.debug('waiting for wwiii_rtree to finish')
+        wwiii_rtree, wwiii_object_list = wwiii_rtree_thread.join()
+        LOGGER.debug('done with all three spatial indexes being built')
 
         geomorphology_proj_wkt = geoprocessing.get_vector_info(
             local_data_path_map['geomorphology_vector_path'])['projection_wkt']
@@ -227,9 +259,11 @@ def cv_grid_worker(
 
         risk_distance_lucode_map = _parse_lulc_code_to_hab(eval(
             local_data_path_map['lulc_code_to_hab_map']))
+        LOGGER.debug(f'risk_distance_lucode_map: {risk_distance_lucode_map}')
 
         risk_dist_raster_map = _parse_habitat_map(eval(
             local_data_path_map['habitat_map']))
+        LOGGER.debug(f'risk_dist_raster_map: {risk_dist_raster_map}')
 
         while True:
             try:
@@ -337,6 +371,7 @@ def cv_grid_worker(
                     local_landmass_vector_path,
                     landmass_boundary_vector_path,
                     local_dem_path, wwiii_rtree,
+                    wwiii_object_list,
                     int(local_data_path_map['n_fetch_rays']),
                     float(local_data_path_map['max_fetch_distance']),
                     'rei', 'ew')
@@ -558,7 +593,7 @@ def calculate_wind_and_wave(
         shore_point_vector_path,
         shore_point_sample_distance, landmass_vector_path,
         landmass_boundary_vector_path, bathymetry_raster_path,
-        wwiii_rtree, n_fetch_rays, max_fetch_distance,
+        wwiii_rtree, wwiii_object_list, n_fetch_rays, max_fetch_distance,
         wind_fieldname, wave_fieldname):
     """Calculate wind exposure for given points.
 
@@ -574,8 +609,10 @@ def calculate_wind_and_wave(
         bathymetry_raster_path (str): path to a raster indicating bathymetry
             values. (negative is deeper).
         wwiii_rtree (str): path to an r_tree that can find the nearest point
-            in lat/lng whose object has values 'REI_PCT', 'REI_V',
-            'WavP_[DIR]', 'WavPPCT', 'V10PCT_[DIR]'.
+            index.
+        wwiii_object_list (list): a list containing objects that can be
+            indexed with nearest point index with in lat/lng whose object has
+            values 'REI_PCT', 'REI_V', 'WavP_[DIR]', 'WavPPCT', 'V10PCT_[DIR]'.
         n_fetch_rays (int): number of equally spaced rays to cast out from
             a point to determine fetch value
         max_fetch_distance (float): maximum distance to send a ray to determine
@@ -680,9 +717,12 @@ def calculate_wind_and_wave(
     for shore_point_feature in target_shore_point_layer:
         shore_point_geom = shore_point_feature.GetGeometryRef().Clone()
         _ = shore_point_geom.Transform(base_to_target_transform)
-        wwiii_point = next(wwiii_rtree.nearest(
-            (shore_point_geom.GetX(), shore_point_geom.GetY()), 1,
-            objects='raw'))
+        wwiii_index = next(wwiii_rtree.query_nearest(
+            (shore_point_geom.GetX(), shore_point_geom.GetY()),
+            all_matches=False))
+
+        wwiii_point = wwiii_object_list[wwiii_index].field_val_map
+
         rei_value = 0.0
         height_list = []
         period_list = []
@@ -1167,14 +1207,14 @@ def clip_geometry(
         base_srs, target_srs)
 
     bounding_box = shapely.geometry.box(*bounding_box_coords)
+    index_intersections = list(global_geom_strtree.query(bounding_box))
     possible_geom_list = [
-        strtree_object_list[index].geom for index in
-        global_geom_strtree.query(bounding_box)]
+        strtree_object_list[index].geom for index in index_intersections]
     if not possible_geom_list:
         layer = None
         vector = None
         raise ValueError('no data intersects this box')
-    for geom in possible_geom_list:
+    for index, geom in zip(index_intersections, possible_geom_list):
         clipped_shapely_geom = bounding_box.intersection(geom)
         clipped_geom = ogr.CreateGeometryFromWkb(clipped_shapely_geom.wkb)
         error_code = clipped_geom.Transform(base_to_target_transform)
@@ -1185,7 +1225,8 @@ def clip_geometry(
         feature.SetGeometry(clipped_geom.Clone())
         for field_name, _ in field_name_type_list:
             feature.SetField(
-                field_name, geom.field_val_map[field_name])
+                field_name,
+                strtree_object_list[index].field_val_map[field_name])
         layer.CreateFeature(feature)
 
 
