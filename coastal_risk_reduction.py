@@ -23,7 +23,6 @@ from osgeo import ogr
 from osgeo import osr
 import numpy
 import retrying
-import rtree
 import shapely.geometry
 import shapely.strtree
 import shapely.wkt
@@ -76,59 +75,6 @@ class ThreadWithReturnValue(threading.Thread):
         except Exception:
             LOGGER.exception(f'exception when joining thread')
             raise
-
-
-# def build_rtree(vector_path):
-#     """Build an rtree that can be queried for nearest neighbors.
-
-#     Parameters:
-#         vector_path (str): path to vector of geometry to build into
-#             r tree.
-
-#     Returns:
-#         rtree.Index object that will return shapely geometry objects with
-#             a field_val_map field that contains the 'fieldname'->value pairs
-#             from the original vector. The main object will also have a
-#             `field_name_type_list` field which contains original
-#             fieldname/field type pairs
-
-#     """
-#     geometry_prep_list = []
-#     vector = gdal.OpenEx(vector_path, gdal.OF_VECTOR)
-#     layer = vector.GetLayer()
-#     layer_defn = layer.GetLayerDefn()
-#     field_name_type_list = []
-#     for index in range(layer_defn.GetFieldCount()):
-#         field_name = layer_defn.GetFieldDefn(index).GetName()
-#         field_type = layer_defn.GetFieldDefn(index).GetType()
-#         field_name_type_list.append((field_name, field_type))
-
-#     envelope_to_shapely_swizzle = [0, 2, 1, 3]
-
-#     LOGGER.debug('loop through features for rtree')
-#     n_features = layer.GetLayerCount()
-#     for index, feature in enumerate(layer):
-#         if index % 1000 == 0:
-#             LOGGER.debug(
-#                 f'{index/n_features*100:.1f}% complete '
-#                 f'{index+1}/{n_features}: {vector_path}')
-
-#         feature_geom = feature.GetGeometryRef()
-#         bound_list = [
-#             feature_geom.GetEnvelope()[i]
-#             for i in envelope_to_shapely_swizzle]
-#         bounds = shapely.box(*bound_list)
-#         field_val_map = {}
-#         for field_name, _ in field_name_type_list:
-#             field_val_map[field_name] = (
-#                 feature.GetField(field_name))
-#         geometry_prep_list.append(
-#             (index, bounds, field_val_map))
-#     LOGGER.debug('constructing the tree')
-#     r_tree = rtree.index.Index(geometry_prep_list)
-#     LOGGER.debug('all done')
-#     r_tree.field_name_type_list = field_name_type_list
-#     return r_tree
 
 
 def build_strtree(vector_path):
@@ -231,20 +177,20 @@ def cv_grid_worker(
         landmass_strtree_thread = ThreadWithReturnValue(
             target=build_strtree,
             args=(local_data_path_map['landmass_vector_path'],))
-        wwiii_rtree_thread = ThreadWithReturnValue(
+        wwiii_strtree_thread = ThreadWithReturnValue(
             target=build_strtree,
             args=(local_data_path_map['wwiii_vector_path'],))
 
         geomorphology_strtree_thread.start()
         landmass_strtree_thread.start()
-        wwiii_rtree_thread.start()
+        wwiii_strtree_thread.start()
 
         LOGGER.debug('waiting for geomorphology_strtree to finish')
         geomorphology_strtree, geomorphology_object_list = geomorphology_strtree_thread.join()
         LOGGER.debug('waiting for landmass_strtree to finish')
         landmass_strtree, landmass_object_list = landmass_strtree_thread.join()
-        LOGGER.debug('waiting for wwiii_rtree to finish')
-        wwiii_rtree, wwiii_object_list = wwiii_rtree_thread.join()
+        LOGGER.debug('waiting for wwiii_strtree to finish')
+        wwiii_strtree, wwiii_object_list = wwiii_strtree_thread.join()
         LOGGER.debug('done with all three spatial indexes being built')
 
         geomorphology_proj_wkt = geoprocessing.get_vector_info(
@@ -370,7 +316,7 @@ def cv_grid_worker(
                     shore_point_sample_distance,
                     local_landmass_vector_path,
                     landmass_boundary_vector_path,
-                    local_dem_path, wwiii_rtree,
+                    local_dem_path, wwiii_strtree,
                     wwiii_object_list,
                     int(local_data_path_map['n_fetch_rays']),
                     float(local_data_path_map['max_fetch_distance']),
@@ -593,7 +539,7 @@ def calculate_wind_and_wave(
         shore_point_vector_path,
         shore_point_sample_distance, landmass_vector_path,
         landmass_boundary_vector_path, bathymetry_raster_path,
-        wwiii_rtree, wwiii_object_list, n_fetch_rays, max_fetch_distance,
+        wwiii_strtree, wwiii_object_list, n_fetch_rays, max_fetch_distance,
         wind_fieldname, wave_fieldname):
     """Calculate wind exposure for given points.
 
@@ -608,7 +554,7 @@ def calculate_wind_and_wave(
             the perimeter of `landmass_vector_path`.
         bathymetry_raster_path (str): path to a raster indicating bathymetry
             values. (negative is deeper).
-        wwiii_rtree (str): path to an r_tree that can find the nearest point
+        wwiii_strtree (str): path to an r_tree that can find the nearest point
             index.
         wwiii_object_list (list): a list containing objects that can be
             indexed with nearest point index with in lat/lng whose object has
@@ -707,7 +653,7 @@ def calculate_wind_and_wave(
     target_shore_point_layer.StartTransaction()
     temp_fetch_rays_layer.StartTransaction()
 
-    # make a transfomer for local points to lat/lng for wwiii_rtree
+    # make a transfomer for local points to lat/lng for wwiii_strtree
     wgs84_srs = osr.SpatialReference()
     wgs84_srs.ImportFromEPSG(4326)
     wgs84_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
@@ -717,7 +663,7 @@ def calculate_wind_and_wave(
     for shore_point_feature in target_shore_point_layer:
         shore_point_geom = shore_point_feature.GetGeometryRef().Clone()
         _ = shore_point_geom.Transform(base_to_target_transform)
-        wwiii_index = next(wwiii_rtree.query_nearest(
+        wwiii_index = next(wwiii_strtree.query_nearest(
             (shore_point_geom.GetX(), shore_point_geom.GetY()),
             all_matches=False))
 
