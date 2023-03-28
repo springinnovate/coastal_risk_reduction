@@ -498,8 +498,7 @@ def calculate_surge(
     shore_geotransform = geoprocessing.get_raster_info(
         shelf_edge_raster_path)['geotransform']
 
-    shelf_rtree = rtree.index.Index()
-
+    point_list = []
     for offset_info, data_block in geoprocessing.iterblocks(
             (shelf_edge_raster_path, 1)):
         row_indexes, col_indexes = numpy.mgrid[
@@ -516,24 +515,20 @@ def calculate_surge(
             shore_geotransform[5] * (row_indexes[valid_mask] + 0.5))
 
         for x_coord, y_coord in zip(x_coordinates, y_coordinates):
-            shelf_rtree.insert(
-                0, [x_coord, y_coord, x_coord, y_coord],
-                obj=shapely.geometry.Point(x_coord, y_coord))
+            point_list.append(shapely.geometry.Point(x_coord, y_coord))
+
+    shelf_strtree = shapely.strtree.STRtree(point_list)
 
     shore_point_layer.StartTransaction()
     for point_feature in shore_point_layer:
         point_geometry = point_feature.GetGeometryRef()
         point_shapely = shapely.wkb.loads(bytes(point_geometry.ExportToWkb()))
-        nearest_point = list(shelf_rtree.nearest(
-                (point_geometry.GetX(),
-                 point_geometry.GetY(),
-                 point_geometry.GetX(),
-                 point_geometry.GetY()),
-                objects='raw', num_results=1))
-        if len(nearest_point) > 0:
-            distance = nearest_point[0].distance(point_shapely)
+        try:
+            nearest_point = point_list[next(shelf_strtree.query_nearest(
+                point_shapely, all_matches=False))]
+            distance = nearest_point.distance(point_shapely)
             point_feature.SetField(surge_fieldname, float(distance))
-        else:
+        except StopIteration:
             # so far away it's essentially not an issue
             point_feature.SetField(surge_fieldname, max_fetch_distance)
         shore_point_layer.SetFeature(point_feature)
@@ -672,10 +667,10 @@ def calculate_wind_and_wave(
     for shore_point_feature in target_shore_point_layer:
         shore_point_geom = shore_point_feature.GetGeometryRef().Clone()
         _ = shore_point_geom.Transform(base_to_target_transform)
+        shore_point_shapely = shapely.wkb.loads(
+            bytes(shore_point_geom.ExportToWkb()))
         wwiii_index = next(wwiii_strtree.query_nearest(
-            (shore_point_geom.GetX(), shore_point_geom.GetY()),
-            all_matches=False))
-
+            shore_point_shapely, all_matches=False))
         wwiii_point = wwiii_object_list[wwiii_index].field_val_map
 
         rei_value = 0.0
@@ -1152,9 +1147,11 @@ def clip_geometry(
     layer = vector.CreateLayer(
         os.path.splitext(os.path.basename(target_vector_path))[0],
         target_srs, ogr_geometry_type)
-    field_name_type_list = list(global_geom_strtree.field_name_type_list)
-    for field_name, field_type in field_name_type_list:
-        layer.CreateField(ogr.FieldDefn(field_name, field_type))
+    field_names_defined = hasattr(global_geom_strtree, 'field_name_type_list')
+    if field_names_defined:
+        field_name_type_list = list(global_geom_strtree.field_name_type_list)
+        for field_name, field_type in field_name_type_list:
+            layer.CreateField(ogr.FieldDefn(field_name, field_type))
     layer_defn = layer.GetLayerDefn()
     base_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
     target_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
@@ -1178,10 +1175,11 @@ def clip_geometry(
             continue
         feature = ogr.Feature(layer_defn)
         feature.SetGeometry(clipped_geom.Clone())
-        for field_name, _ in field_name_type_list:
-            feature.SetField(
-                field_name,
-                strtree_object_list[index].field_val_map[field_name])
+        if field_names_defined:
+            for field_name, _ in field_name_type_list:
+                feature.SetField(
+                    field_name,
+                    strtree_object_list[index].field_val_map[field_name])
         layer.CreateFeature(feature)
 
 
@@ -1610,9 +1608,9 @@ def vector_to_lines(base_vector_path, target_line_vector_path):
 
 def geometry_to_lines(geometry):
     """Convert a geometry object to a list of lines."""
-    if geometry.type == 'Polygon':
+    if geometry.geom_type == 'Polygon':
         return polygon_to_lines(geometry)
-    elif geometry.type == 'MultiPolygon':
+    elif geometry.geom_type == 'MultiPolygon':
         line_list = []
         for geom in geometry.geoms:
             line_list.extend(geometry_to_lines(geom))
