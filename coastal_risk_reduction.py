@@ -38,6 +38,7 @@ HABITAT_MAP_KEY = 'habitat_map'
 SHORE_POINT_SAMPLE_DISTANCE_KEY = 'shore_point_sample_distance'
 LULC_CODE_TO_HAB_MAP_KEY = 'lulc_code_to_hab_map'
 
+MAX_WORKERS = 1
 
 TARGET_NODATA = -1
 
@@ -65,7 +66,7 @@ class ThreadWithReturnValue(threading.Thread):
             if self._target is not None:
                 self._return = self._target(*self._args, **self._kwargs)
         except Exception:
-            LOGGER.exception(f'exception when running thread')
+            LOGGER.exception('exception when running thread')
             raise
 
     def join(self, *args):
@@ -73,7 +74,7 @@ class ThreadWithReturnValue(threading.Thread):
             threading.Thread.join(self, *args)
             return self._return
         except Exception:
-            LOGGER.exception(f'exception when joining thread')
+            LOGGER.exception('exception when joining thread')
             raise
 
 
@@ -139,7 +140,8 @@ def build_strtree(
         LOGGER.debug(f'constructing the tree for {vector_path}')
         str_tree = shapely.strtree.STRtree(geometry_prep_list)
         LOGGER.debug(
-            f'constrcuted tree for {vector_path} in {time.time()-start_time:.2f}s')
+            f'constrcuted tree for {vector_path} in '
+            f'{time.time()-start_time:.2f}s')
         if fields_to_copy is not None:
             str_tree.field_name_type_list = field_name_type_list
         return str_tree, object_list
@@ -195,7 +197,8 @@ def cv_grid_worker(
         wwiii_strtree_thread.start()
 
         LOGGER.debug('waiting for geomorphology_strtree to finish')
-        geomorphology_strtree, geomorphology_object_list = geomorphology_strtree_thread.join()
+        geomorphology_strtree, geomorphology_object_list = \
+            geomorphology_strtree_thread.join()
         LOGGER.debug('waiting for landmass_strtree to finish')
         landmass_strtree, landmass_object_list = landmass_strtree_thread.join()
         LOGGER.debug('waiting for wwiii_strtree to finish')
@@ -252,8 +255,8 @@ def cv_grid_worker(
                     buffered_bounding_box_list, osr.SRS_WKT_WGS84_LAT_LONG,
                     utm_srs.ExportToWkt(), edge_samples=11)
 
-                # calculate (hab_id, risk, dist) -> raster mask tuples given lulc map
-                # and a lookup of lulc to risk tuples
+                # calculate (hab_id, risk, dist) -> raster mask tuples given
+                # lulc map and a lookup of lulc to risk tuples
                 habitat_raster_path_map = clip_and_mask_habitat(
                     risk_distance_lucode_map,
                     local_data_path_map['lulc_raster_path'],
@@ -301,8 +304,8 @@ def cv_grid_worker(
                     workspace_dir, 'slr.tif')
                 clip_and_reproject_raster(
                     local_data_path_map['slr_raster_path'], local_slr_path,
-                    utm_srs.ExportToWkt(), bounding_box_list, 0, 'bilinear', True,
-                    target_pixel_size)
+                    utm_srs.ExportToWkt(), bounding_box_list, 0, 'bilinear',
+                    True, target_pixel_size)
 
                 # Rrelief
                 LOGGER.info('calculate relief on %s', workspace_dir)
@@ -397,7 +400,8 @@ def calculate_geomorphology(
     shore_point_layer = shore_point_vector.GetLayer()
     shore_point_layer.CreateField(
         ogr.FieldDefn(geomorphology_fieldname, ogr.OFTReal))
-    geomorphology_strtree = build_strtree(geomorphology_vector_path)
+    geomorphology_strtree, geomporphology_object_list = build_strtree(
+        geomorphology_vector_path, ['Rgeo'])
 
     shore_point_layer.StartTransaction()
     for shore_point_feature in shore_point_layer:
@@ -405,7 +409,9 @@ def calculate_geomorphology(
             bytes(shore_point_feature.GetGeometryRef().ExportToWkb()))
         min_dist = max_fetch_distance
         geo_risk = 5
-        for line in geomorphology_strtree.query(shore_point_geom.buffer(500)):
+        for line_index in geomorphology_strtree.query(
+                shore_point_geom.buffer(500)):
+            line = geomporphology_object_list[line_index]
             cur_dist = line.distance(shore_point_geom)
             if cur_dist < min_dist:
                 min_dist = cur_dist
@@ -524,11 +530,11 @@ def calculate_surge(
         point_geometry = point_feature.GetGeometryRef()
         point_shapely = shapely.wkb.loads(bytes(point_geometry.ExportToWkb()))
         try:
-            nearest_point = point_list[next(shelf_strtree.query_nearest(
-                point_shapely, all_matches=False))]
+            nearest_point = point_list[shelf_strtree.query_nearest(
+                point_shapely, all_matches=False)[0]]
             distance = nearest_point.distance(point_shapely)
             point_feature.SetField(surge_fieldname, float(distance))
-        except StopIteration:
+        except IndexError:
             # so far away it's essentially not an issue
             point_feature.SetField(surge_fieldname, max_fetch_distance)
         shore_point_layer.SetFeature(point_feature)
@@ -652,7 +658,8 @@ def calculate_wind_and_wave(
     landmass_boundary_vector = None
     landmass_boundary_union_geom_prep = shapely.prepared.prep(
         landmass_boundary_union_geom)
-    landmass_boundary_strtree = build_strtree(landmass_boundary_vector_path)
+    landmass_boundary_strtree, landmass_boundary_object_list = build_strtree(
+        landmass_boundary_vector_path)
 
     target_shore_point_layer.StartTransaction()
     temp_fetch_rays_layer.StartTransaction()
@@ -669,8 +676,8 @@ def calculate_wind_and_wave(
         _ = shore_point_geom.Transform(base_to_target_transform)
         shore_point_shapely = shapely.wkb.loads(
             bytes(shore_point_geom.ExportToWkb()))
-        wwiii_index = next(wwiii_strtree.query_nearest(
-            shore_point_shapely, all_matches=False))
+        wwiii_index = wwiii_strtree.query_nearest(
+            shore_point_shapely, all_matches=False)[0]
         wwiii_point = wwiii_object_list[wwiii_index].field_val_map
 
         rei_value = 0.0
@@ -751,9 +758,11 @@ def calculate_wind_and_wave(
                 while True:
                     intersection = False
                     ray_envelope = ray_geometry.GetEnvelope()
-                    for landmass_line in landmass_boundary_strtree.query(
+                    for landmass_index in landmass_boundary_strtree.query(
                              shapely.geometry.box(
                                 *[ray_envelope[i] for i in [0, 2, 1, 3]])):
+                        landmass_line = landmass_boundary_object_list[
+                            landmass_index]
                         if landmass_line.id in tested_indexes:
                             continue
                         tested_indexes.add(landmass_line.id)
@@ -1159,7 +1168,7 @@ def clip_geometry(
         base_srs, target_srs)
 
     bounding_box = shapely.geometry.box(*bounding_box_coords)
-    index_intersections = list(global_geom_strtree.query(bounding_box))
+    index_intersections = global_geom_strtree.query(bounding_box)
     possible_geom_list = [
         strtree_object_list[index].geom for index in index_intersections]
     if not possible_geom_list:
@@ -2271,7 +2280,8 @@ def clip_and_mask_habitat(
     reclassify_threads = []
     habitat_raster_risk_map = collections.defaultdict(list)
     LOGGER.debug(f'risk dist lucode tuple: {risk_dist_lucode_map}')
-    for hab_id_risk_distance_tuple, risk_lucodes in risk_dist_lucode_map.items():
+    for hab_id_risk_distance_tuple, risk_lucodes in \
+            risk_dist_lucode_map.items():
         reclass_map = {
             val: 1 for val in risk_lucodes
         }
@@ -2404,7 +2414,7 @@ def calculate_degree_cell_cv(
         bb_work_queue.put((index, boundary_box.bounds))
         n_boxes += 1
 
-    for worker_id in range(min(1, n_boxes+1, int(multiprocessing.cpu_count()))):
+    for worker_id in range(min(MAX_WORKERS, n_boxes+1, int(multiprocessing.cpu_count()))):
         cv_grid_worker_thread = multiprocessing.Process(
             target=cv_grid_worker,
             args=(
