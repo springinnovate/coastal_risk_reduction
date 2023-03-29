@@ -1258,29 +1258,34 @@ def sample_line_to_points(
         ['OVERWRITE=YES'])
     point_defn = point_layer.GetLayerDefn()
     for feature in line_layer:
-        current_distance = 0.0
-        line_geom = feature.GetGeometryRef()
-        line = shapely.wkb.loads(bytes(line_geom.ExportToWkb()))
-        if isinstance(line, shapely.geometry.collection.GeometryCollection):
-            line_list = []
-            for geom in list(line):
-                if isinstance(geom, (
-                        shapely.geometry.linestring.LineString,
-                        shapely.geometry.multilinestring.MultiLineString)):
-                    line_list.append(geom)
-            print('building: %s', line_list)
-            line = shapely.geometry.MultiLineString(line_list)
-        while current_distance < line.length:
-            try:
-                new_point = line.interpolate(current_distance)
-                current_distance += point_step_size
-                new_point_feature = ogr.Feature(point_defn)
-                new_point_geom = ogr.CreateGeometryFromWkb(new_point.wkb)
-                new_point_feature.SetGeometry(new_point_geom)
-                point_layer.CreateFeature(new_point_feature)
-            except Exception:
-                LOGGER.exception('error on %s', line_geom)
-                raise
+        try:
+            current_distance = 0.0
+            line_geom = feature.GetGeometryRef()
+            line = shapely.wkb.loads(bytes(line_geom.ExportToWkb()))
+            if isinstance(line, shapely.geometry.collection.GeometryCollection):
+                line_list = []
+                for geom in list(line):
+                    if isinstance(geom, (
+                            shapely.geometry.linestring.LineString,
+                            shapely.geometry.multilinestring.MultiLineString)):
+                        line_list.append(geom)
+                print('building: %s', line_list)
+                line = shapely.geometry.MultiLineString(line_list)
+            while current_distance < line.length:
+                try:
+                    new_point = line.interpolate(current_distance)
+                    current_distance += point_step_size
+                    new_point_feature = ogr.Feature(point_defn)
+                    new_point_geom = ogr.CreateGeometryFromWkb(new_point.wkb)
+                    new_point_feature.SetGeometry(new_point_geom)
+                    point_layer.CreateFeature(new_point_feature)
+                except Exception:
+                    LOGGER.exception('error on %s', line_geom)
+                    raise
+        except TypeError:
+            LOGGER.exception(
+                f'error when processing {feature} from {line_vector_path}')
+            continue
 
     point_layer = None
     point_vector = None
