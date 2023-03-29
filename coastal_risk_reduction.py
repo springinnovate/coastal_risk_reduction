@@ -343,11 +343,13 @@ def cv_grid_worker(
                     'rei', 'ew')
 
                 # Rsurge
+                LOGGER.debug(f'calculate rsurge on {payload}')
                 calculate_surge(
                     shore_point_vector_path, local_dem_path,
                     float(local_data_path_map['max_fetch_distance']), 'surge')
 
                 # Rgeomorphology
+                LOGGER.debug(f'calculate geomorphology on {payload}')
                 calculate_geomorphology(
                     shore_point_vector_path, local_geomorphology_vector_path,
                     float(local_data_path_map['max_fetch_distance']),
@@ -669,6 +671,8 @@ def calculate_wind_and_wave(
     landmass_boundary_strtree, landmass_boundary_object_list = build_strtree(
         landmass_boundary_vector_path)
 
+    LOGGER.debug('# TODO: SLOW FROM HERE!!!!!!!!!!!!!!!!')
+
     target_shore_point_layer.StartTransaction()
     temp_fetch_rays_layer.StartTransaction()
 
@@ -678,6 +682,11 @@ def calculate_wind_and_wave(
     wgs84_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
     base_to_target_transform = osr.CoordinateTransformation(
         shore_point_srs, wgs84_srs)
+
+    ray_test_time = 0
+    ray_iterate_time = 0
+    ray_geometry_construction_time = 0
+    compute_wave_height_time = 0
 
     for shore_point_feature in target_shore_point_layer:
         shore_point_geom = shore_point_feature.GetGeometryRef().Clone()
@@ -708,7 +717,6 @@ def calculate_wind_and_wave(
             compass_theta = float(sample_index) / n_fetch_rays * 360
 
             # wwiii_point should be closest point to shore point
-
             rei_pct = wwiii_point[
                 'REI_PCT%d' % int(compass_theta)]
             rei_v = wwiii_point[
@@ -761,6 +769,7 @@ def calculate_wind_and_wave(
                 # original possible intersections.  Since this algorithm
                 # will be run for a long time, it's worth the additional
                 # complexity
+                start_time = time.time()
                 tested_indexes = set()
                 while True:
                     intersection = False
@@ -783,7 +792,8 @@ def calculate_wind_and_wave(
                             break
                     if not intersection:
                         break
-
+                ray_test_time += time.time() - start_time
+                start_time = time.time()
                 ray_step_loc = 0.0
                 bathy_values = []
                 # walk along ray
@@ -805,6 +815,9 @@ def calculate_wind_and_wave(
                     avg_bathy_value = numpy.mean(bathy_values)
                 else:
                     avg_bathy_value = 0.0
+                ray_iterate_time += time.time()-start_time
+
+                start_time = time.time()
                 # when we get here, we have the final ray geometry
                 ray_feature = ogr.Feature(temp_fetch_rays_defn)
                 ray_feature.SetField('fetch_dist', ray_shapely.length)
@@ -822,9 +835,12 @@ def calculate_wind_and_wave(
                 shore_point_feature.SetField(
                     'fdepth_%d' % compass_degree, float(avg_bathy_value))
 
+                ray_geometry_construction_time += time.time()-start_time
+
                 velocity = wwiii_point['V10PCT_%d' % compass_degree]
                 occurrence = wwiii_point['REI_PCT%d' % compass_degree]
 
+                start_time = time.time()
                 height = compute_wave_height(
                     velocity, ray_shapely.length, avg_bathy_value)
                 height_list.append(height)
@@ -841,6 +857,7 @@ def calculate_wind_and_wave(
 
                 ray_feature = None
                 rei_value += ray_length * rei_pct * rei_v
+                compute_wave_height_time += time.time() - start_time
         shore_point_feature.SetField(wind_fieldname, rei_value)
         shore_point_feature.SetField(wave_fieldname, max(e_ocean, e_local))
         target_shore_point_layer.SetFeature(shore_point_feature)
@@ -859,6 +876,12 @@ def calculate_wind_and_wave(
         shutil.rmtree(temp_workspace_dir)
     except Exception:
         LOGGER.exception('unable to remove %s', temp_workspace_dir)
+    finally:
+        LOGGER.info(
+            f'\nray_test_time: {ray_test_time:.2f}s\n'
+            f'ray_iterate_time: {ray_iterate_time:.2f}s\n'
+            f'ray_geometry_construction_time: {ray_geometry_construction_time:.2f}s\n'
+            f'compute_wave_height_time: {compute_wave_height_time:.2f}s\n')
 
 
 def calculate_slr(shore_point_vector_path, slr_raster_path, target_fieldname):
