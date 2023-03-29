@@ -2487,7 +2487,7 @@ def calculate_degree_cell_cv(
 
     merge_cv_points_thread = threading.Thread(
         target=merge_cv_points,
-        args=(cv_point_complete_queue, len(shore_grid_layer),
+        args=(cv_point_complete_queue, n_boxes,
               target_cv_vector_path))
     merge_cv_points_thread.start()
 
