@@ -411,7 +411,7 @@ def calculate_geomorphology(
         geo_risk = 5
         for line_index in geomorphology_strtree.query(
                 shore_point_geom.buffer(500)):
-            line = geomporphology_object_list[line_index]
+            line = geomporphology_object_list[line_index].geom
             cur_dist = line.distance(shore_point_geom)
             if cur_dist < min_dist:
                 min_dist = cur_dist
@@ -734,7 +734,7 @@ def calculate_wind_and_wave(
                 max_fetch_distance)
 
             # build ray geometry so we can intersect it later
-            ray_geometry = shapely.geometry.LineString(
+            ray_shapely = shapely.geometry.LineString(
                 [[point_a_x, point_a_y], [point_b_x, point_b_y]])
 
             # keep a shapely version of the ray so we can do fast intersection
@@ -757,18 +757,18 @@ def calculate_wind_and_wave(
                 while True:
                     intersection = False
                     for landmass_index in landmass_boundary_strtree.query(
-                            shapely.box(*ray_geometry.bounds)):
+                            shapely.box(*ray_shapely.bounds)):
                         landmass_line = landmass_boundary_object_list[
                             landmass_index]
                         if landmass_line.id in tested_indexes:
                             continue
                         tested_indexes.add(landmass_line.id)
-                        if ray_geometry.Intersects(landmass_line.geom):
-                            intersection_point = ray_geometry.Intersection(
+                        if ray_shapely.intersects(landmass_line.geom):
+                            intersection_point = ray_shapely.intersection(
                                 landmass_line.geom)
                             # offset the dist with smallest_feature_size
                             # update the endpoint of the ray
-                            ray_geometry = shapely.geometry.LineString(
+                            ray_shapely = shapely.geometry.LineString(
                                 [[point_a_x, point_a_y],
                                  [intersection_point.x, intersection_point.y]])
                             intersection = True
@@ -779,8 +779,6 @@ def calculate_wind_and_wave(
                 ray_step_loc = 0.0
                 bathy_values = []
                 # walk along ray
-                ray_shapely = shapely.wkb.loads(
-                    bytes(ray_geometry.ExportToWkb()))
                 while ray_step_loc < ray_shapely.length:
                     sample_point = ray_shapely.interpolate(ray_step_loc)
                     ray_step_loc += shore_point_sample_distance/4
@@ -803,10 +801,11 @@ def calculate_wind_and_wave(
                 ray_feature = ogr.Feature(temp_fetch_rays_defn)
                 ray_feature.SetField('fetch_dist', ray_shapely.length)
                 ray_feature.SetField('direction', compass_degree)
+                ray_geometry = ogr.CreateGeometryFromWkb(ray_shapely.wkb)
                 ray_feature.SetGeometry(ray_geometry)
                 temp_fetch_rays_layer.CreateFeature(ray_feature)
-                rei_value += ray_shapely.length * rei_pct * rei_v
-                ray_length = ray_geometry.Length()
+                ray_length = ray_shapely.length
+                rei_value += ray_length * rei_pct * rei_v
                 ray_feature = None
                 ray_geometry = None
 
@@ -833,7 +832,6 @@ def calculate_wind_and_wave(
                         wwiii_point['WavPPCT%d' % compass_degree])
 
                 ray_feature = None
-                ray_geometry = None
                 rei_value += ray_length * rei_pct * rei_v
         shore_point_feature.SetField(wind_fieldname, rei_value)
         shore_point_feature.SetField(wave_fieldname, max(e_ocean, e_local))
