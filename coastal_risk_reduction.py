@@ -734,9 +734,8 @@ def calculate_wind_and_wave(
                 max_fetch_distance)
 
             # build ray geometry so we can intersect it later
-            ray_geometry = ogr.Geometry(ogr.wkbLineString)
-            ray_geometry.AddPoint(point_a_x, point_a_y)
-            ray_geometry.AddPoint(point_b_x, point_b_y)
+            ray_geometry = shapely.geometry.LineString(
+                [[point_a_x, point_a_y], [point_b_x, point_b_y]])
 
             # keep a shapely version of the ray so we can do fast intersection
             # with it and the entire landmass
@@ -757,10 +756,8 @@ def calculate_wind_and_wave(
                 tested_indexes = set()
                 while True:
                     intersection = False
-                    ray_envelope = ray_geometry.GetEnvelope()
                     for landmass_index in landmass_boundary_strtree.query(
-                             shapely.geometry.box(
-                                *[ray_envelope[i] for i in [0, 2, 1, 3]])):
+                            ray_geometry.bounds):
                         landmass_line = landmass_boundary_object_list[
                             landmass_index]
                         if landmass_line.id in tested_indexes:
@@ -771,11 +768,9 @@ def calculate_wind_and_wave(
                                 landmass_line.geom)
                             # offset the dist with smallest_feature_size
                             # update the endpoint of the ray
-                            ray_geometry = ogr.Geometry(ogr.wkbLineString)
-                            ray_geometry.AddPoint(point_a_x, point_a_y)
-                            ray_geometry.AddPoint(
-                                intersection_point.GetX(),
-                                intersection_point.GetY())
+                            ray_geometry = shapely.geometry.LineString(
+                                [[point_a_x, point_a_y],
+                                 [intersection_point.x, intersection_point.y]])
                             intersection = True
                             break
                     if not intersection:
