@@ -757,7 +757,7 @@ def calculate_wind_and_wave(
                 while True:
                     intersection = False
                     for landmass_index in landmass_boundary_strtree.query(
-                            ray_geometry.bounds):
+                            shapely.box(*ray_geometry.bounds)):
                         landmass_line = landmass_boundary_object_list[
                             landmass_index]
                         if landmass_line.id in tested_indexes:
