@@ -267,6 +267,7 @@ def cv_grid_worker(
 
                 local_geomorphology_vector_path = os.path.join(
                     workspace_dir, 'geomorphology.gpkg')
+                LOGGER.debug(f'clip geomorphology for {payload}')
                 clip_geometry(
                     bounding_box_list, wgs84_srs, utm_srs,
                     ogr.wkbMultiLineString, geomorphology_strtree,
@@ -275,12 +276,14 @@ def cv_grid_worker(
 
                 shore_point_vector_path = os.path.join(
                     workspace_dir, 'shore_points.gpkg')
+                LOGGER.debug(f'sample geomorphology to points for {payload}')
                 sample_line_to_points(
                     local_geomorphology_vector_path, shore_point_vector_path,
                     shore_point_sample_distance)
 
                 local_landmass_vector_path = os.path.join(
                     workspace_dir, 'landmass.gpkg')
+                LOGGER.debug(f'clip landmass for {payload}')
                 clip_geometry(
                     buffered_bounding_box_list, wgs84_srs, utm_srs,
                     ogr.wkbPolygon, landmass_strtree,
@@ -289,11 +292,13 @@ def cv_grid_worker(
 
                 landmass_boundary_vector_path = os.path.join(
                     workspace_dir, 'landmass_boundary.gpkg')
+                LOGGER.debug(f'landmass to lines for {payload}')
                 vector_to_lines(
                     local_landmass_vector_path, landmass_boundary_vector_path)
 
                 local_dem_path = os.path.join(
                     workspace_dir, 'dem.tif')
+                LOGGER.debug(f'clip and reproject dem {payload}')
                 clip_and_reproject_raster(
                     local_data_path_map['dem_raster_path'], local_dem_path,
                     utm_srs.ExportToWkt(), bounding_box_list,
@@ -302,27 +307,30 @@ def cv_grid_worker(
 
                 local_slr_path = os.path.join(
                     workspace_dir, 'slr.tif')
+                LOGGER.debug(f'clip and reproject slr {payload}')
                 clip_and_reproject_raster(
                     local_data_path_map['slr_raster_path'], local_slr_path,
                     utm_srs.ExportToWkt(), bounding_box_list, 0, 'bilinear',
                     True, target_pixel_size)
 
                 # Rrelief
-                LOGGER.info('calculate relief on %s', workspace_dir)
+                LOGGER.info(f'calculate relief on {payload}')
                 calculate_relief(
                     shore_point_vector_path,
                     float(local_data_path_map['relief_sample_distance']),
                     local_dem_path, 'relief')
-                LOGGER.info('calculate rhab on %s', workspace_dir)
+                LOGGER.info(f'calculate rhab on {payload}')
                 # Rhab
                 calculate_rhab(
                     shore_point_vector_path, habitat_raster_path_map, 'Rhab',
                     target_pixel_size)
 
                 # Rslr
+                LOGGER.debug(f'calculate slr {payload}')
                 calculate_slr(shore_point_vector_path, local_slr_path, 'slr')
 
                 # wind and wave power
+                LOGGER.debug(f'calculate wind and wave on {payload}')
                 calculate_wind_and_wave(
                     shore_point_vector_path,
                     shore_point_sample_distance,
