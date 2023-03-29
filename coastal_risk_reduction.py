@@ -671,7 +671,7 @@ def calculate_wind_and_wave(
     landmass_boundary_strtree, landmass_boundary_object_list = build_strtree(
         landmass_boundary_vector_path)
 
-    LOGGER.debug('# TODO: SLOW FROM HERE!!!!!!!!!!!!!!!!')
+    LOGGER.debug('Starting local ray cast sampling')
 
     target_shore_point_layer.StartTransaction()
     temp_fetch_rays_layer.StartTransaction()
@@ -687,6 +687,9 @@ def calculate_wind_and_wave(
     ray_iterate_time = 0
     ray_geometry_construction_time = 0
     compute_wave_height_time = 0
+    local_interp_time = 0
+    bathy_read_time = 0
+    point_creation_time = 0
 
     for shore_point_feature in target_shore_point_layer:
         shore_point_geom = shore_point_feature.GetGeometryRef().Clone()
@@ -761,14 +764,6 @@ def calculate_wind_and_wave(
             if not landmass_boundary_union_geom_prep.intersects(
                     ray_point_origin_shapely):
                 # the origin is in ocean, so we'll get a ray length > 0.0
-
-                # This algorithm searches for intersections, if one is found
-                # the ray updates and a smaller intersection set is determined
-                # by experimentation I've found this is significant, but not
-                # an order of magnitude, faster than looping through all
-                # original possible intersections.  Since this algorithm
-                # will be run for a long time, it's worth the additional
-                # complexity
                 start_time = time.time()
                 tested_indexes = set()
                 while True:
@@ -794,22 +789,37 @@ def calculate_wind_and_wave(
                         break
                 ray_test_time += time.time() - start_time
                 start_time = time.time()
-                ray_step_loc = 0.0
                 bathy_values = []
-                # walk along ray
-                while ray_step_loc < ray_shapely.length:
-                    sample_point = ray_shapely.interpolate(ray_step_loc)
-                    ray_step_loc += shore_point_sample_distance/4
-                    pixel_x, pixel_y = [int(x) for x in gdal.ApplyGeoTransform(
-                        bathy_inv_gt,
-                        sample_point.coords[0][0], sample_point.coords[0][1])]
+                local_time = time.time()
+                (start_x, start_y), (end_x, end_y) = ray_shapely.coords
+
+                delta_x = end_x-start_x
+                delta_y = end_y-start_y
+                point_array = (
+                    numpy.arange(
+                        0, ray_shapely.length,
+                        shore_point_sample_distance/4).reshape(-1, 1) /
+                    ray_shapely.length * numpy.array([delta_x, delta_y]) +
+                    numpy.array([start_x, start_y]))
+
+                local_interp_time += time.time()-local_time
+
+                local_time = time.time()
+                point_array = (
+                    point_array*[bathy_inv_gt[1], bathy_inv_gt[5]] +
+                    [bathy_inv_gt[0], bathy_inv_gt[3]])
+                point_creation_time += time.time()-local_time
+
+                local_time = time.time()
+                for pixel_x, pixel_y in point_array:
                     if (pixel_x < 0 or pixel_y < 0 or
                             pixel_x >= bathy_band.XSize or
                             pixel_y >= bathy_band.YSize):
-                        continue
+                        break
                     bathy_values.append(
                         bathy_band.ReadAsArray(
-                            pixel_x, pixel_y, 1, 1)[0][0])
+                            int(pixel_x), int(pixel_y), 1, 1)[0][0])
+                bathy_read_time += time.time()-local_time
 
                 if bathy_values:
                     avg_bathy_value = numpy.mean(bathy_values)
@@ -880,6 +890,9 @@ def calculate_wind_and_wave(
         LOGGER.info(
             f'\nray_test_time: {ray_test_time:.2f}s\n'
             f'ray_iterate_time: {ray_iterate_time:.2f}s\n'
+            f'\tlocal_interp_time: {local_interp_time:.2f}s\n'
+            f'\tbathy_read_time: {bathy_read_time:.2f}s\n'
+            f'\tpoint_creation_time: {point_creation_time:.2f}s\n'
             f'ray_geometry_construction_time: {ray_geometry_construction_time:.2f}s\n'
             f'compute_wave_height_time: {compute_wave_height_time:.2f}s\n')
 
