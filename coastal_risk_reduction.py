@@ -411,8 +411,8 @@ def calculate_geomorphology(
         geo_risk = 5
         for line_index in geomorphology_strtree.query(
                 shore_point_geom.buffer(500)):
-            line = geomporphology_object_list[line_index].geom
-            cur_dist = line.distance(shore_point_geom)
+            line = geomporphology_object_list[line_index]
+            cur_dist = line.geom.distance(shore_point_geom)
             if cur_dist < min_dist:
                 min_dist = cur_dist
                 geo_risk = line.field_val_map['Rgeo']
