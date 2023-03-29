@@ -38,7 +38,7 @@ HABITAT_MAP_KEY = 'habitat_map'
 SHORE_POINT_SAMPLE_DISTANCE_KEY = 'shore_point_sample_distance'
 LULC_CODE_TO_HAB_MAP_KEY = 'lulc_code_to_hab_map'
 
-MAX_WORKERS = 1
+MAX_WORKERS = 24
 
 TARGET_NODATA = -1
 
@@ -1789,7 +1789,8 @@ def merge_masks_op(mask_a, mask_b, nodata_a, nodata_b, target_nodata):
     return result
 
 
-def merge_cv_points(cv_vector_queue, target_cv_vector_path):
+def merge_cv_points(
+        cv_vector_queue, expected_payload_count, target_cv_vector_path):
     """Merge vectors in `cv_vector_queue` into single vector.
 
     Parameters:
@@ -1803,54 +1804,69 @@ def merge_cv_points(cv_vector_queue, target_cv_vector_path):
         None.
 
     """
-    gpkg_driver = ogr.GetDriverByName('GPKG')
-    target_cv_vector = gpkg_driver.CreateDataSource(target_cv_vector_path)
-    layer_name = os.path.basename(os.path.splitext(target_cv_vector_path)[0])
-    wgs84_srs = osr.SpatialReference()
-    wgs84_srs.ImportFromEPSG(4326)
-    wgs84_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-    target_cv_layer = (
-        target_cv_vector.CreateLayer(layer_name, wgs84_srs, ogr.wkbPoint))
+    try:
+        gpkg_driver = ogr.GetDriverByName('GPKG')
+        target_cv_vector = gpkg_driver.CreateDataSource(target_cv_vector_path)
+        layer_name = os.path.basename(os.path.splitext(target_cv_vector_path)[0])
+        wgs84_srs = osr.SpatialReference()
+        wgs84_srs.ImportFromEPSG(4326)
+        wgs84_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        target_cv_layer = (
+            target_cv_vector.CreateLayer(layer_name, wgs84_srs, ogr.wkbPoint))
 
-    target_cv_layer.StartTransaction()
-    fields_to_copy = []
-    while True:
-        cv_vector_path = cv_vector_queue.get()
-        if cv_vector_path == STOP_SENTINEL:
-            break
-        cv_vector = gdal.OpenEx(cv_vector_path, gdal.OF_VECTOR)
-        cv_layer = cv_vector.GetLayer()
-        cv_layer_defn = cv_layer.GetLayerDefn()
-        if not fields_to_copy:
-            # create the initial set of fields
-            for fld_index in range(cv_layer_defn.GetFieldCount()):
-                original_field = cv_layer_defn.GetFieldDefn(fld_index)
-                field_name = original_field.GetName()
-                target_field = ogr.FieldDefn(
-                    field_name, original_field.GetType())
-                target_cv_layer.CreateField(target_field)
-                fields_to_copy.append(field_name)
+        target_cv_layer.StartTransaction()
+        fields_to_copy = []
+        payload_count = 0
+        start_time = time.time()
+        while True:
+            cv_vector_path = cv_vector_queue.get()
+            payload_count += 1
+            if cv_vector_path == STOP_SENTINEL:
+                break
+            cv_vector = gdal.OpenEx(cv_vector_path, gdal.OF_VECTOR)
+            cv_layer = cv_vector.GetLayer()
+            cv_layer_defn = cv_layer.GetLayerDefn()
+            if not fields_to_copy:
+                # create the initial set of fields
+                for fld_index in range(cv_layer_defn.GetFieldCount()):
+                    original_field = cv_layer_defn.GetFieldDefn(fld_index)
+                    field_name = original_field.GetName()
+                    target_field = ogr.FieldDefn(
+                        field_name, original_field.GetType())
+                    target_cv_layer.CreateField(target_field)
+                    fields_to_copy.append(field_name)
 
-        target_cv_layer_defn = target_cv_layer.GetLayerDefn()
-        cv_projection = cv_layer.GetSpatialRef()
-        cv_projection.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-        base_to_target_transform = osr.CoordinateTransformation(
-            cv_projection, wgs84_srs)
+            target_cv_layer_defn = target_cv_layer.GetLayerDefn()
+            cv_projection = cv_layer.GetSpatialRef()
+            cv_projection.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+            base_to_target_transform = osr.CoordinateTransformation(
+                cv_projection, wgs84_srs)
 
-        for cv_feature in cv_layer:
-            cv_geom = cv_feature.GetGeometryRef().Clone()
-            _ = cv_geom.Transform(base_to_target_transform)
-            target_feature = ogr.Feature(target_cv_layer_defn)
-            target_feature.SetGeometry(cv_geom)
-            for field_id in fields_to_copy:
-                target_feature.SetField(
-                    field_id, cv_feature.GetField(field_id))
-            target_cv_layer.CreateFeature(target_feature)
-        cv_feature = None
-        cv_geom = None
-        cv_layer = None
-        cv_vector = None
-    target_cv_layer.CommitTransaction()
+            for cv_feature in cv_layer:
+                cv_geom = cv_feature.GetGeometryRef().Clone()
+                _ = cv_geom.Transform(base_to_target_transform)
+                target_feature = ogr.Feature(target_cv_layer_defn)
+                target_feature.SetGeometry(cv_geom)
+                for field_id in fields_to_copy:
+                    target_feature.SetField(
+                        field_id, cv_feature.GetField(field_id))
+                target_cv_layer.CreateFeature(target_feature)
+            cv_feature = None
+            cv_geom = None
+            cv_layer = None
+            cv_vector = None
+
+            expected_runtime = (expected_payload_count-payload_count) * (
+                time.time()-start_time)/payload_count
+            LOGGER.info(
+                f'merge cv points {payload_count/expected_payload_count*100:.2f}% complete, '
+                f'expect {expected_runtime:.2f}s to complete')
+
+        target_cv_layer.CommitTransaction()
+    except Exception:
+        LOGGER.exception('error in merge_cv_points')
+    finally:
+        LOGGER.info('merge cv points complete')
 
 
 def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
@@ -2471,7 +2487,8 @@ def calculate_degree_cell_cv(
 
     merge_cv_points_thread = threading.Thread(
         target=merge_cv_points,
-        args=(cv_point_complete_queue, target_cv_vector_path))
+        args=(cv_point_complete_queue, len(shore_grid_layer),
+              target_cv_vector_path))
     merge_cv_points_thread.start()
 
     habitat_fieldname_list = list(eval(
