@@ -23,6 +23,7 @@ from osgeo import ogr
 from osgeo import osr
 import numpy
 import retrying
+import shapely.errors
 import shapely.geometry
 import shapely.strtree
 import shapely.wkt
@@ -645,7 +646,11 @@ def calculate_wind_and_wave(
         shapely.wkb.loads(bytes(f.GetGeometryRef().ExportToWkb()))
         for f in landmass_layer]
     if landmass_geom_list:
-        landmass_union_geom = shapely.ops.unary_union(landmass_geom_list)
+        try:
+            landmass_union_geom = shapely.ops.unary_union(landmass_geom_list)
+        except shapely.errors.GEOSException:
+            LOGGER.exception('error on invalid geom, skipping')
+            landmass_union_geom = shapely.Polygon()
     else:
         landmass_union_geom = shapely.Polygon()
 
