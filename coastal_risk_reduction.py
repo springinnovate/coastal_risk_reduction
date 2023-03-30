@@ -9,6 +9,7 @@ import math
 import multiprocessing
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -360,7 +361,8 @@ def cv_grid_worker(
                 cv_point_complete_queue.put(shore_point_vector_path)
 
             except Exception:
-                LOGGER.exception('error on %s, removing workspace', payload)
+                LOGGER.warning(
+                    f'error on {payload}, removing workspace, skipping')
                 retrying_rmtree(workspace_dir)
     except Exception:
         LOGGER.exception('something horrible happened on')
@@ -1822,19 +1824,25 @@ def merge_cv_points_and_add_risk(
 
     """
     try:
-        gpkg_driver = ogr.GetDriverByName('GPKG')
-        target_cv_vector = gpkg_driver.CreateDataSource(target_cv_vector_path)
-        layer_name = os.path.basename(os.path.splitext(target_cv_vector_path)[0])
-        wgs84_srs = osr.SpatialReference()
-        wgs84_srs.ImportFromEPSG(4326)
-        wgs84_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-        target_cv_layer = (
-            target_cv_vector.CreateLayer(layer_name, wgs84_srs, ogr.wkbPoint))
+        # gpkg_driver = ogr.GetDriverByName('GPKG')
+        # target_cv_vector = gpkg_driver.CreateDataSource(target_cv_vector_path)
+        # layer_name = os.path.basename(os.path.splitext(target_cv_vector_path)[0])
+        # wgs84_srs = osr.SpatialReference()
+        # wgs84_srs.ImportFromEPSG(4326)
+        # wgs84_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        # target_cv_layer = (
+        #     target_cv_vector.CreateLayer(layer_name, wgs84_srs, ogr.wkbPoint))
+        # target_cv_layer.StartTransaction()
 
-        target_cv_layer.StartTransaction()
-        fields_to_copy = []
+        # fields_to_copy = []
+        if os.path.exists(target_cv_vector_path):
+            os.remove(target_cv_vector_path)
         payload_count = 0
         start_time = time.time()
+        cv_vector_path_list = []
+        directory_to_merge = os.path.join(
+            os.path.dirname(target_cv_vector_path), 'to_merge')
+        os.makedirs(directory_to_merge, exist_ok=True)
         while True:
             cv_vector_path = cv_vector_queue.get()
             payload_count += 1
@@ -1842,43 +1850,51 @@ def merge_cv_points_and_add_risk(
                 break
             add_cv_vector_risk(
                 habitat_fieldname_list, cv_vector_path)
+            to_merge_path = os.path.join(
+                directory_to_merge, os.path.basename(cv_vector_path))
+            if not os.path.exists(target_cv_vector_path):
+                shutil.copy(cv_vector_path, target_cv_vector_path)
+            else:
+                cmd = f'ogr2ogr -f "GPKG" -update -append {target_cv_vector_path} {cv_vector_path}'
+                result_str = subprocess.check_output(cmd, shell=True)
+                LOGGER.info(result_str)
 
-            cv_vector = gdal.OpenEx(cv_vector_path, gdal.OF_VECTOR)
-            cv_layer = cv_vector.GetLayer()
-            cv_layer_defn = cv_layer.GetLayerDefn()
-            if not fields_to_copy:
-                # create the initial set of fields
-                for fld_index in range(cv_layer_defn.GetFieldCount()):
-                    original_field = cv_layer_defn.GetFieldDefn(fld_index)
-                    field_name = original_field.GetName()
-                    target_field = ogr.FieldDefn(
-                        field_name, original_field.GetType())
-                    target_cv_layer.CreateField(target_field)
-                    fields_to_copy.append(field_name)
+            # cv_vector = gdal.OpenEx(cv_vector_path, gdal.OF_VECTOR)
+            # cv_layer = cv_vector.GetLayer()
+            # cv_layer_defn = cv_layer.GetLayerDefn()
+            # if not fields_to_copy:
+            #     # create the initial set of fields
+            #     for fld_index in range(cv_layer_defn.GetFieldCount()):
+            #         original_field = cv_layer_defn.GetFieldDefn(fld_index)
+            #         field_name = original_field.GetName()
+            #         target_field = ogr.FieldDefn(
+            #             field_name, original_field.GetType())
+            #         target_cv_layer.CreateField(target_field)
+            #         fields_to_copy.append(field_name)
 
-            target_cv_layer_defn = target_cv_layer.GetLayerDefn()
-            cv_projection = cv_layer.GetSpatialRef()
-            cv_projection.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-            base_to_target_transform = osr.CoordinateTransformation(
-                cv_projection, wgs84_srs)
+            # target_cv_layer_defn = target_cv_layer.GetLayerDefn()
+            # cv_projection = cv_layer.GetSpatialRef()
+            # cv_projection.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+            # base_to_target_transform = osr.CoordinateTransformation(
+            #     cv_projection, wgs84_srs)
 
-            for cv_feature in cv_layer:
-                cv_geom = cv_feature.GetGeometryRef().Clone()
-                _ = cv_geom.Transform(base_to_target_transform)
-                target_feature = ogr.Feature(target_cv_layer_defn)
-                target_feature.SetGeometry(cv_geom)
-                for field_id in fields_to_copy:
-                    try:
-                        target_feature.SetField(
-                            field_id, cv_feature.GetField(field_id))
-                    except KeyError:
-                        LOGGER.exception(f'********** field error in merge_cv_points_and_add_risk {field_id} {target_cv_layer_defn}')
-                        sys.exit(-1)
-                target_cv_layer.CreateFeature(target_feature)
-            cv_feature = None
-            cv_geom = None
-            cv_layer = None
-            cv_vector = None
+            # for cv_feature in cv_layer:
+            #     cv_geom = cv_feature.GetGeometryRef().Clone()
+            #     _ = cv_geom.Transform(base_to_target_transform)
+            #     target_feature = ogr.Feature(target_cv_layer_defn)
+            #     target_feature.SetGeometry(cv_geom)
+            #     for field_id in fields_to_copy:
+            #         try:
+            #             target_feature.SetField(
+            #                 field_id, cv_feature.GetField(field_id))
+            #         except KeyError:
+            #             LOGGER.exception(f'********** field error in merge_cv_points_and_add_risk {field_id} {target_cv_layer_defn}')
+            #             sys.exit(-1)
+            #     target_cv_layer.CreateFeature(target_feature)
+            # cv_feature = None
+            # cv_geom = None
+            # cv_layer = None
+            # cv_vector = None
 
             expected_runtime = (expected_payload_count-payload_count) * (
                 time.time()-start_time)/payload_count
