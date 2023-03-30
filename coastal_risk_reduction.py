@@ -1294,8 +1294,8 @@ def sample_line_to_points(
                     LOGGER.exception('error on %s', line_geom)
                     raise
         except TypeError:
-            LOGGER.exception(
-                f'error when processing {feature} from {line_vector_path}')
+            LOGGER.warning(
+                f'error when processing {feature} from {line_vector_path}, skipping')
             continue
 
     point_layer = None
@@ -1868,8 +1868,12 @@ def merge_cv_points_and_add_risk(
                 target_feature = ogr.Feature(target_cv_layer_defn)
                 target_feature.SetGeometry(cv_geom)
                 for field_id in fields_to_copy:
-                    target_feature.SetField(
-                        field_id, cv_feature.GetField(field_id))
+                    try:
+                        target_feature.SetField(
+                            field_id, cv_feature.GetField(field_id))
+                    except KeyError:
+                        LOGGER.exception(f'********** field error in merge_cv_points_and_add_risk {field_id} {target_cv_layer_defn}')
+                        sys.exit(-1)
                 target_cv_layer.CreateFeature(target_feature)
             cv_feature = None
             cv_geom = None
@@ -1930,7 +1934,11 @@ def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
             nan_mask = numpy.isnan(base_array)
             max_val = numpy.max(base_array[~nan_mask])
             base_array[nan_mask] = max_val
-            hist, bin_edges = numpy.histogram(base_array, bins=5)
+            try:
+                hist, bin_edges = numpy.histogram(base_array, bins=5)
+            except IndexError:
+                LOGGER.exception(f'****** error on historgram: {base_array}')
+                sys.exit(-1)
 
             cv_risk_layer.ResetReading()
             cv_risk_layer.StartTransaction()
