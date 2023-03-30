@@ -1031,7 +1031,7 @@ def calculate_rhab(
 
     for payload, hab_raster_path_list in (
                 habitat_raster_path_map.items()):
-        LOGGER.debug(f'**********{payload} {hab_raster_path_list}')
+        LOGGER.debug(f'{payload} {hab_raster_path_list}')
         if isinstance(payload, tuple):
             (hab_id, risk_val, eff_dist) = payload
         elif payload == NOHAB_ID:
