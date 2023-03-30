@@ -1839,10 +1839,8 @@ def merge_cv_points_and_add_risk(
             os.remove(target_cv_vector_path)
         payload_count = 0
         start_time = time.time()
-        cv_vector_path_list = []
-        directory_to_merge = os.path.join(
-            os.path.dirname(target_cv_vector_path), 'to_merge')
-        os.makedirs(directory_to_merge, exist_ok=True)
+        #cv_vector_path_list = []
+        result = None
         while True:
             cv_vector_path = cv_vector_queue.get()
             payload_count += 1
@@ -1850,14 +1848,19 @@ def merge_cv_points_and_add_risk(
                 break
             add_cv_vector_risk(
                 habitat_fieldname_list, cv_vector_path)
-            to_merge_path = os.path.join(
-                directory_to_merge, os.path.basename(cv_vector_path))
+
+            # to_merge_path = os.path.join(
+            #     directory_to_merge, os.path.basename(cv_vector_path))
             if not os.path.exists(target_cv_vector_path):
                 shutil.copy(cv_vector_path, target_cv_vector_path)
+                cmd = f'ogr2ogr -f "GPKG" -t_srs EPSG:4326 {target_cv_vector_path} {cv_vector_path}'
             else:
-                cmd = f'ogr2ogr -f "GPKG" -update -append {target_cv_vector_path} {cv_vector_path}'
-                result_str = subprocess.check_output(cmd, shell=True)
-                LOGGER.info(result_str)
+                cmd = f'ogr2ogr -f "GPKG" -t_srs EPSG:4326 -update -append {target_cv_vector_path} {cv_vector_path}'
+            #result_str = subprocess.check_output(cmd, shell=True)
+            if result is not None:
+                result.wait()
+            result = subprocess.Popen(cmd, shell=True)
+            LOGGER.info(result)
 
             # cv_vector = gdal.OpenEx(cv_vector_path, gdal.OF_VECTOR)
             # cv_layer = cv_vector.GetLayer()
@@ -1901,8 +1904,8 @@ def merge_cv_points_and_add_risk(
             LOGGER.info(
                 f'merge cv points {payload_count/expected_payload_count*100:.2f}% complete, '
                 f'expect {expected_runtime:.2f}s to complete')
-
-        target_cv_layer.CommitTransaction()
+        result.wait()
+        #target_cv_layer.CommitTransaction()
     except Exception:
         LOGGER.exception('error in merge_cv_points_and_add_risk')
     finally:
