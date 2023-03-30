@@ -1937,7 +1937,7 @@ def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
             try:
                 hist, bin_edges = numpy.histogram(base_array, bins=5)
             except IndexError:
-                LOGGER.exception(f'****** error on historgram: {base_array}')
+                LOGGER.exception(f'****** error on historgram for {base_field}/{risk_field} on {cv_risk_vector_path}: {base_array}')
                 sys.exit(-1)
 
             cv_risk_layer.ResetReading()
