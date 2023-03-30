@@ -785,10 +785,16 @@ def calculate_wind_and_wave(
                                 landmass_line.geom)
                             # offset the dist with smallest_feature_size
                             # update the endpoint of the ray
-                            ray_shapely = shapely.geometry.LineString(
-                                [[point_a_x, point_a_y],
-                                 [intersection_point.x, intersection_point.y]])
                             intersection = True
+                            try:
+                                ray_shapely = shapely.geometry.LineString(
+                                    [[point_a_x, point_a_y],
+                                     [intersection_point.x, intersection_point.y]])
+                            except AttributeError:
+                                LOGGER.warning(
+                                    f'for some reason result was not a point: '
+                                    f'{intersection_point}')
+                                continue
                             break
                     if not intersection:
                         break
