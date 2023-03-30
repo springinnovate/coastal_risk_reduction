@@ -649,7 +649,7 @@ def calculate_wind_and_wave(
         try:
             landmass_union_geom = shapely.ops.unary_union(landmass_geom_list)
         except shapely.errors.GEOSException:
-            LOGGER.exception('error on invalid geom, skipping')
+            LOGGER.warning('error on invalid geom, skipping')
             landmass_union_geom = shapely.Polygon()
     else:
         landmass_union_geom = shapely.Polygon()
