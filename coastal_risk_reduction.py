@@ -1799,8 +1799,9 @@ def merge_masks_op(mask_a, mask_b, nodata_a, nodata_b, target_nodata):
     return result
 
 
-def merge_cv_points(
-        cv_vector_queue, expected_payload_count, target_cv_vector_path):
+def merge_cv_points_and_add_risk(
+        cv_vector_queue, expected_payload_count, habitat_fieldname_list,
+        target_cv_vector_path):
     """Merge vectors in `cv_vector_queue` into single vector.
 
     Parameters:
@@ -1833,6 +1834,9 @@ def merge_cv_points(
             payload_count += 1
             if cv_vector_path == STOP_SENTINEL:
                 break
+            add_cv_vector_risk(
+                habitat_fieldname_list, cv_vector_path)
+
             cv_vector = gdal.OpenEx(cv_vector_path, gdal.OF_VECTOR)
             cv_layer = cv_vector.GetLayer()
             cv_layer_defn = cv_layer.GetLayerDefn()
@@ -1874,7 +1878,7 @@ def merge_cv_points(
 
         target_cv_layer.CommitTransaction()
     except Exception:
-        LOGGER.exception('error in merge_cv_points')
+        LOGGER.exception('error in merge_cv_points_and_add_risk')
     finally:
         LOGGER.info('merge cv points complete')
 
@@ -1903,121 +1907,140 @@ def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
     Return:
         None
     """
-    cv_risk_vector = gdal.OpenEx(
-        cv_risk_vector_path, gdal.OF_VECTOR | gdal.GA_Update)
-    cv_risk_layer = cv_risk_vector.GetLayer()
+    try:
+        LOGGER.debug(f'adding risk for {cv_risk_vector_path}')
+        cv_risk_vector = gdal.OpenEx(
+            cv_risk_vector_path, gdal.OF_VECTOR | gdal.GA_Update)
+        cv_risk_layer = cv_risk_vector.GetLayer()
 
-    for base_field, risk_field in [
-            ('surge', 'Rsurge'), ('ew', 'Rwave'), ('rei', 'Rwind'),
-            ('slr', 'Rslr'), ('relief', 'Rrelief')]:
-        cv_risk_layer.CreateField(ogr.FieldDefn(risk_field, ogr.OFTReal))
-        base_array = numpy.empty(shape=(cv_risk_layer.GetFeatureCount(),))
-        for index, feature in enumerate(cv_risk_layer):
-            base_array[index] = feature.GetField(base_field)
-        nan_mask = numpy.isnan(base_array)
-        max_val = numpy.max(base_array[~nan_mask])
-        base_array[nan_mask] = max_val
-        hist, bin_edges = numpy.histogram(base_array, bins=5)
+        for base_field, risk_field in [
+                ('surge', 'Rsurge'), ('ew', 'Rwave'), ('rei', 'Rwind'),
+                ('slr', 'Rslr'), ('relief', 'Rrelief')]:
+            LOGGER.info(f'set risk field for {base_field} {risk_field}')
+            cv_risk_layer.CreateField(ogr.FieldDefn(risk_field, ogr.OFTReal))
+            base_array = numpy.empty(shape=(cv_risk_layer.GetFeatureCount(),))
+            for index, feature in enumerate(cv_risk_layer):
+                base_array[index] = feature.GetField(base_field)
+            nan_mask = numpy.isnan(base_array)
+            max_val = numpy.max(base_array[~nan_mask])
+            base_array[nan_mask] = max_val
+            hist, bin_edges = numpy.histogram(base_array, bins=5)
+
+            cv_risk_layer.ResetReading()
+            cv_risk_layer.StartTransaction()
+            n_features = cv_risk_layer.GetFeatureCount()
+            for index, feature in enumerate(cv_risk_layer):
+                if index % 1000 == 0:
+                    LOGGER.info(
+                        f'{index/n_features*100:.2f}% complete for {risk_field} '
+                        f'{index+1}/{n_features}')
+                base_val = feature.GetField(base_field)
+                risk = bisect.bisect_left(bin_edges, base_val)
+                if risk < 1:
+                    risk = 1
+                elif risk > 5:
+                    risk = 5
+                feature.SetField(risk_field, risk)
+                cv_risk_layer.SetFeature(feature)
+            cv_risk_layer.CommitTransaction()
+        cv_risk_layer.ResetReading()
+
+        cv_risk_layer.CreateField(ogr.FieldDefn('Rt', ogr.OFTReal))
+        for hab_field in habitat_fieldname_list:
+            cv_risk_layer.CreateField(
+                ogr.FieldDefn('Rhab_%s' % hab_field, ogr.OFTReal))
+            cv_risk_layer.CreateField(
+                ogr.FieldDefn('Rnohab_%s' % hab_field, ogr.OFTReal))
+            cv_risk_layer.CreateField(
+                ogr.FieldDefn('Rt_nohab_%s' % hab_field, ogr.OFTReal))
+            cv_risk_layer.CreateField(
+                ogr.FieldDefn('Rt_habservice_%s' % hab_field, ogr.OFTReal))
+        cv_risk_layer.CreateField(ogr.FieldDefn('Rhab_all', ogr.OFTReal))
+        cv_risk_layer.CreateField(ogr.FieldDefn('Rt_nohab_all', ogr.OFTReal))
 
         cv_risk_layer.ResetReading()
         cv_risk_layer.StartTransaction()
-        for feature in cv_risk_layer:
-            base_val = feature.GetField(base_field)
-            risk = bisect.bisect_left(bin_edges, base_val)
-            if risk < 1:
-                risk = 1
-            elif risk > 5:
-                risk = 5
-            feature.SetField(risk_field, risk)
-            cv_risk_layer.SetFeature(feature)
-        cv_risk_layer.CommitTransaction()
-    cv_risk_layer.ResetReading()
+        LOGGER.info('calcualte Rts for all points')
+        for index, feature in enumerate(cv_risk_layer):
+            if index % 1000 == 0:
+                LOGGER.info(
+                    f'{index/n_features*100:.2f}% complete for {risk_field} '
+                    f'{index+1}/{n_features}')
+            hab_val_map = {}
+            for hab_field in habitat_fieldname_list:
+                hab_val = feature.GetField(hab_field)
+                feature.SetField('Rhab_%s' % hab_field, hab_val)
+                hab_val_map[hab_field] = hab_val
 
-    cv_risk_layer.CreateField(ogr.FieldDefn('Rt', ogr.OFTReal))
-    for hab_field in habitat_fieldname_list:
-        cv_risk_layer.CreateField(
-            ogr.FieldDefn('Rhab_%s' % hab_field, ogr.OFTReal))
-        cv_risk_layer.CreateField(
-            ogr.FieldDefn('Rnohab_%s' % hab_field, ogr.OFTReal))
-        cv_risk_layer.CreateField(
-            ogr.FieldDefn('Rt_nohab_%s' % hab_field, ogr.OFTReal))
-        cv_risk_layer.CreateField(
-            ogr.FieldDefn('Rt_habservice_%s' % hab_field, ogr.OFTReal))
-    cv_risk_layer.CreateField(ogr.FieldDefn('Rhab_all', ogr.OFTReal))
-    cv_risk_layer.CreateField(ogr.FieldDefn('Rt_nohab_all', ogr.OFTReal))
+                # loop through every hab field but hab_field to calc Rhab_no
+                risk_diff_list = []  # for (5-rk) vals
+                for sub_hab_field in habitat_fieldname_list:
+                    if sub_hab_field != hab_field:
+                        risk_diff_list.append(5-feature.GetField(sub_hab_field))
 
-    cv_risk_layer.ResetReading()
-    cv_risk_layer.StartTransaction()
-    for feature in cv_risk_layer:
-        hab_val_map = {}
-        for hab_field in habitat_fieldname_list:
-            hab_val = feature.GetField(hab_field)
-            feature.SetField('Rhab_%s' % hab_field, hab_val)
-            hab_val_map[hab_field] = hab_val
+                r_nohab = 4.8 - 0.5 * numpy.sqrt(
+                    (1.5 * max(risk_diff_list))**2 +
+                    numpy.sum([x**2 for x in risk_diff_list]) -
+                    max(risk_diff_list)**2)
+                feature.SetField('Rnohab_%s' % hab_field, r_nohab)
 
+            # Rhab
             # loop through every hab field but hab_field to calc Rhab_no
             risk_diff_list = []  # for (5-rk) vals
             for sub_hab_field in habitat_fieldname_list:
-                if sub_hab_field != hab_field:
-                    risk_diff_list.append(5-feature.GetField(sub_hab_field))
+                risk_diff_list.append(5-feature.GetField(sub_hab_field))
 
             r_nohab = 4.8 - 0.5 * numpy.sqrt(
                 (1.5 * max(risk_diff_list))**2 +
                 numpy.sum([x**2 for x in risk_diff_list]) -
                 max(risk_diff_list)**2)
-            feature.SetField('Rnohab_%s' % hab_field, r_nohab)
+            feature.SetField('Rhab_all', r_nohab)
 
-        # Rhab
-        # loop through every hab field but hab_field to calc Rhab_no
-        risk_diff_list = []  # for (5-rk) vals
-        for sub_hab_field in habitat_fieldname_list:
-            risk_diff_list.append(5-feature.GetField(sub_hab_field))
+            # Rt
+            exposure_index = 1.0
+            for risk_field in [
+                    'Rgeomorphology', 'Rhab_all', 'Rsurge', 'Rwave', 'Rwind',
+                    'Rslr', 'Rrelief']:
+                exposure_index *= feature.GetField(risk_field)
+            exposure_index = (exposure_index)**(1./7.)
+            feature.SetField('Rt', exposure_index)
 
-        r_nohab = 4.8 - 0.5 * numpy.sqrt(
-            (1.5 * max(risk_diff_list))**2 +
-            numpy.sum([x**2 for x in risk_diff_list]) -
-            max(risk_diff_list)**2)
-        feature.SetField('Rhab_all', r_nohab)
-
-        # Rt
-        exposure_index = 1.0
-        for risk_field in [
-                'Rgeomorphology', 'Rhab_all', 'Rsurge', 'Rwave', 'Rwind',
-                'Rslr', 'Rrelief']:
-            exposure_index *= feature.GetField(risk_field)
-        exposure_index = (exposure_index)**(1./7.)
-        feature.SetField('Rt', exposure_index)
-
-        # Rt_nohaball
-        nohab_exposure_index = 1.0
-        for risk_field in [
-                'Rgeomorphology', 'Rsurge', 'Rwave', 'Rwind', 'Rslr',
-                'Rrelief']:
-            nohab_exposure_index *= feature.GetField(risk_field)
-        # the *4.8 is to get the "missing" habitat risk in there
-        # (4.8 comes from equation 15)
-        nohab_exposure_index = (nohab_exposure_index * 4.8)**(1./7.)
-        feature.SetField('Rt_nohab_all', nohab_exposure_index)
-
-        for hab_field in habitat_fieldname_list:
+            # Rt_nohaball
             nohab_exposure_index = 1.0
             for risk_field in [
                     'Rgeomorphology', 'Rsurge', 'Rwave', 'Rwind', 'Rslr',
-                    'Rrelief', 'Rnohab_%s' % hab_field]:
+                    'Rrelief']:
                 nohab_exposure_index *= feature.GetField(risk_field)
-            nohab_exposure_index = (nohab_exposure_index)**(1./7.)
-            feature.SetField('Rt_nohab_%s' % hab_field, nohab_exposure_index)
-            # service is the difference between Rt without the habitat and
-            # Rt with all habitats.
-            hab_service = (nohab_exposure_index - feature.GetField('Rt'))
-            if numpy.isclose(hab_service, 0.0):
-                hab_service = 0.0
-            feature.SetField('Rt_habservice_%s' % hab_field, hab_service)
+            # the *4.8 is to get the "missing" habitat risk in there
+            # (4.8 comes from equation 15)
+            nohab_exposure_index = (nohab_exposure_index * 4.8)**(1./7.)
+            feature.SetField('Rt_nohab_all', nohab_exposure_index)
 
-        cv_risk_layer.SetFeature(feature)
-    cv_risk_layer.CommitTransaction()
-    cv_risk_layer = None
-    cv_risk_vector = None
+            for hab_field in habitat_fieldname_list:
+                nohab_exposure_index = 1.0
+                for risk_field in [
+                        'Rgeomorphology', 'Rsurge', 'Rwave', 'Rwind', 'Rslr',
+                        'Rrelief', 'Rnohab_%s' % hab_field]:
+                    nohab_exposure_index *= feature.GetField(risk_field)
+                nohab_exposure_index = (nohab_exposure_index)**(1./7.)
+                feature.SetField('Rt_nohab_%s' % hab_field, nohab_exposure_index)
+                # service is the difference between Rt without the habitat and
+                # Rt with all habitats.
+                hab_service = (nohab_exposure_index - feature.GetField('Rt'))
+                if numpy.isclose(hab_service, 0.0):
+                    hab_service = 0.0
+                feature.SetField('Rt_habservice_%s' % hab_field, hab_service)
+
+            cv_risk_layer.SetFeature(feature)
+        cv_risk_layer.CommitTransaction()
+        cv_risk_layer = None
+        cv_risk_vector = None
+    except Exception:
+        LOGGER.exception(
+            f'something bad happened when calculating risk on '
+            f'{cv_risk_vector_path}')
+    finally:
+        LOGGER.info(f'all done adding risk to {cv_risk_vector_path}')
 
 
 def mask_by_height_op(pop_array, dem_array, mask_height, pop_nodata):
@@ -2495,15 +2518,8 @@ def calculate_degree_cell_cv(
 
     bb_work_queue.put(STOP_SENTINEL)
 
-    merge_cv_points_thread = threading.Thread(
-        target=merge_cv_points,
-        args=(cv_point_complete_queue, n_boxes,
-              target_cv_vector_path))
-    merge_cv_points_thread.start()
-
     habitat_fieldname_list = list(eval(
         local_data_path_map['habitat_map']).keys())
-
     risk_dist_raster_map = _parse_lulc_code_to_hab(eval(
         local_data_path_map['lulc_code_to_hab_map']))
 
@@ -2514,16 +2530,23 @@ def calculate_degree_cell_cv(
         # first element is the hab id
         habitat_fieldname_list.append(key[0])
 
+    merge_cv_points_and_add_risk_thread = threading.Thread(
+        target=merge_cv_points_and_add_risk,
+        args=(cv_point_complete_queue, n_boxes,
+              list(set(habitat_fieldname_list)),
+              target_cv_vector_path))
+    merge_cv_points_and_add_risk_thread.start()
+
     for cv_grid_worker_thread in cv_grid_worker_list:
         cv_grid_worker_thread.join()
 
     # when workers are complete signal merger complete
     cv_point_complete_queue.put(STOP_SENTINEL)
-    merge_cv_points_thread.join()
+    merge_cv_points_and_add_risk_thread.join()
 
     LOGGER.debug('calculate cv vector risk')
-    add_cv_vector_risk(
-        list(set(habitat_fieldname_list)), target_cv_vector_path)
+    # add_cv_vector_risk(
+    #     list(set(habitat_fieldname_list)), target_cv_vector_path)
 
 
 def _process_scenario_ini(scenario_config_path):
