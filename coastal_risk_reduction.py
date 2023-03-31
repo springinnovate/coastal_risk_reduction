@@ -2140,13 +2140,23 @@ def calculate_habitat_value(
             basename = os.path.basename(os.path.splitext(hab_raster_path)[0])
             local_clip_raster_path = os.path.join(
                 temp_workspace_dir, f'{basename}.tif')
-            clip_and_reproject_raster(
-                hab_raster_path, local_clip_raster_path,
-                shore_point_info['projection_wkt'],
-                shore_point_info['bounding_box'], None, 'near', False,
-                target_pixel_size)
+            task_graph.add_task(
+                func=clip_and_reproject_raster,
+                args=(
+                    hab_raster_path, local_clip_raster_path,
+                    shore_point_info['projection_wkt'],
+                    shore_point_info['bounding_box'], None, 'near', False,
+                    target_pixel_size),
+                target_path_list=[local_clip_raster_path],
+                task_name=f'clipping {local_clip_raster_path}')
             local_clip_stack.append(local_clip_raster_path)
-        merge_mask_list(local_clip_stack, nohab_raster_path)
+        task_graph.join()
+        task_graph.add_task(
+            func=merge_mask_list,
+            args=(local_clip_stack, nohab_raster_path),
+            target_path_list=[nohab_raster_path],
+            task_name=f'merge to {nohab_raster_path}')
+        task_graph.join()
 
     hab_value_raster_path_list = []
     task_list = []
