@@ -2123,6 +2123,9 @@ def calculate_habitat_value(
     risk_dist_raster_map = _parse_habitat_map(eval(
         scenario_config['habitat_map']))
 
+    shore_point_info = geoprocessing.get_vector_info(
+        shore_sample_point_vector_path)
+
     habitat_raster_path_map = clip_and_mask_habitat(
         risk_distance_lucode_map,
         scenario_config['lulc_raster_path'],
@@ -2156,7 +2159,8 @@ def calculate_habitat_value(
             args=(
                 shore_sample_point_vector_path, key, temp_workspace_dir,
                 hab_raster_path_list, target_pixel_size,
-                nohab_raster_path))
+                nohab_raster_path, results_dir),
+            store_result=True)
         task_list.append(process_hab_task)
 
     for task in task_list:
@@ -2174,7 +2178,7 @@ def calculate_habitat_value(
 def _process_hab(
         shore_sample_point_vector_path, key, temp_workspace_dir,
         hab_raster_path_list, target_pixel_size,
-        nohab_raster_path):
+        nohab_raster_path, results_dir):
 
     gpkg_driver = ogr.GetDriverByName('gpkg')
     shore_sample_point_vector = gdal.OpenEx(
