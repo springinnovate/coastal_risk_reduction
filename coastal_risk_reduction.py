@@ -2087,7 +2087,7 @@ def mask_by_height_op(pop_array, dem_array, mask_height, pop_nodata):
 
 
 def calculate_habitat_value(
-        task_graph, shore_sample_point_vector_path, scenario_config,
+        shore_sample_point_vector_path, scenario_config,
         results_dir):
     """Calculate habitat value.
 
@@ -2097,7 +2097,6 @@ def calculate_habitat_value(
     pixel of habitat is for protection of the coastline.
 
     Parameters:
-        task_graph (taskgraph): Used to parallelize and avoid repeated
         shore_sample_point_vector_path (str): path to CV analysis vector
             containing at least the fields `Rt` and `Rt_nohab_[hab]` for all
             habitat types under consideration.
@@ -2122,15 +2121,21 @@ def calculate_habitat_value(
         scenario_config['lulc_code_to_hab_map']))
     risk_dist_raster_map = _parse_habitat_map(eval(
         scenario_config['habitat_map']))
+    task_graph = taskgraph.TaskGraph(
+        temp_workspace_dir, len(risk_dist_raster_map))
 
     shore_point_info = geoprocessing.get_vector_info(
         shore_sample_point_vector_path)
 
-    habitat_raster_path_map = clip_and_mask_habitat(
-        risk_distance_lucode_map,
-        scenario_config['lulc_raster_path'],
-        risk_dist_raster_map, shore_point_info['bounding_box'],
-        osr.SRS_WKT_WGS84_LAT_LONG, target_pixel_size, results_dir)
+    habitat_raster_path_map = task_graph.add_task(
+        func=clip_and_mask_habitat,
+        args=(
+            risk_distance_lucode_map,
+            scenario_config['lulc_raster_path'],
+            risk_dist_raster_map, shore_point_info['bounding_box'],
+            osr.SRS_WKT_WGS84_LAT_LONG, target_pixel_size, results_dir),
+        store_result=True,
+        task_name='clip and mask habitat layer').get()
 
     nohab_raster_path = None
     if NOHAB_ID in habitat_raster_path_map:
@@ -2742,7 +2747,7 @@ def main():
 
         LOGGER.info('starting hab value calc')
         calculate_habitat_value(
-            task_graph, target_cv_vector_path, scenario_config,
+            target_cv_vector_path, scenario_config,
             local_habitat_value_dir)
 
     task_graph.join()
