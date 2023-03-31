@@ -34,6 +34,7 @@ ogr.UseExceptions()
 
 GLOBAL_INI_PATH = 'global_config.ini'
 NOHAB_ID = 'nohab'
+_VALUE_COVER_NODATA = 0
 
 # These are globally defined keys expected in global_config.ini
 HABITAT_MAP_KEY = 'habitat_map'
@@ -2086,7 +2087,8 @@ def mask_by_height_op(pop_array, dem_array, mask_height, pop_nodata):
 
 
 def calculate_habitat_value(
-        shore_sample_point_vector_path, scenario_config, results_dir):
+        task_graph, shore_sample_point_vector_path, scenario_config,
+        results_dir):
     """Calculate habitat value.
 
     Will create rasters in the `results_dir` directory named from the
@@ -2095,6 +2097,7 @@ def calculate_habitat_value(
     pixel of habitat is for protection of the coastline.
 
     Parameters:
+        task_graph (taskgraph): Used to parallelize and avoid repeated
         shore_sample_point_vector_path (str): path to CV analysis vector
             containing at least the fields `Rt` and `Rt_nohab_[hab]` for all
             habitat types under consideration.
@@ -2107,15 +2110,10 @@ def calculate_habitat_value(
         None.
     """
     temp_workspace_dir = os.path.join(results_dir, 'hvc')
+
     for dir_path in [results_dir, temp_workspace_dir]:
         os.makedirs(dir_path, exist_ok=True)
 
-    gpkg_driver = ogr.GetDriverByName('gpkg')
-    shore_sample_point_vector = gdal.OpenEx(
-        shore_sample_point_vector_path, gdal.OF_VECTOR)
-    shore_sample_point_layer = shore_sample_point_vector.GetLayer()
-    shore_point_info = geoprocessing.get_vector_info(
-        shore_sample_point_vector_path)
     target_pixel_size = (
         eval(scenario_config['hab_val_pixel_size_wgs84']),
         -eval(scenario_config['hab_val_pixel_size_wgs84']))
@@ -2148,159 +2146,184 @@ def calculate_habitat_value(
         merge_mask_list(local_clip_stack, nohab_raster_path)
 
     hab_value_raster_path_list = []
+    task_list = []
     for key, hab_raster_path_list in habitat_raster_path_map.items():
         if key == NOHAB_ID:
             # already processed above
             continue
-        (hab_id, risk, protective_distance) = key
+        process_hab_task = task_graph.add_task(
+            func=_process_hab,
+            args=(
+                shore_sample_point_vector_path, key, temp_workspace_dir,
+                hab_raster_path_list, target_pixel_size,
+                nohab_raster_path))
+        task_list.append(process_hab_task)
 
-        local_hab_raster_path = os.path.join(
-            temp_workspace_dir, f'{hab_id}.tif')
-
-        local_clip_stack = []
-        for hab_raster_path in hab_raster_path_list:
-            basename = os.path.basename(os.path.splitext(hab_raster_path)[0])
-            local_clip_raster_path = os.path.join(
-                temp_workspace_dir, f'{basename}.tif')
-            clip_and_reproject_raster(
-                hab_raster_path, local_clip_raster_path,
-                shore_point_info['projection_wkt'],
-                shore_point_info['bounding_box'], None, 'near', False,
-                target_pixel_size)
-            local_clip_stack.append(local_clip_raster_path)
-        merge_mask_list(local_clip_stack, local_hab_raster_path)
-
-        if nohab_raster_path is not None:
-            LOGGER.info(
-                f'unmasking {local_hab_raster_path} with '
-                f'{nohab_raster_path}')
-            local_habknockout_hab_raster_path = os.path.join(
-                temp_workspace_dir, f'habknockout_{hab_id}.tif')
-            unmask_raster(
-                local_hab_raster_path, nohab_raster_path,
-                local_habknockout_hab_raster_path)
-            local_hab_raster_path = local_habknockout_hab_raster_path
-
-        habitat_service_id = 'Rt_habservice_%s' % hab_id
-        buffer_habitat_path = os.path.join(
-            temp_workspace_dir, '%s_buffer.gpkg' % hab_id)
-        buffer_habitat_vector = gpkg_driver.CreateDataSource(
-            buffer_habitat_path)
-        wgs84_srs = osr.SpatialReference()
-        wgs84_srs.ImportFromEPSG(4326)
-        wgs84_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-        buffer_habitat_layer = (
-            buffer_habitat_vector.CreateLayer(
-                habitat_service_id, wgs84_srs, ogr.wkbPolygon))
-        buffer_habitat_layer.CreateField(ogr.FieldDefn(
-            habitat_service_id, ogr.OFTReal))
-        buffer_habitat_layer_defn = buffer_habitat_layer.GetLayerDefn()
-
-        shore_sample_point_layer.ResetReading()
-        buffer_habitat_layer.StartTransaction()
-        for point_index, point_feature in enumerate(shore_sample_point_layer):
-            if point_index % 1000 == 0:
-                LOGGER.debug(
-                    'point buffering is %.2f%% complete',
-                    point_index / shore_sample_point_layer.GetFeatureCount() *
-                    100.0)
-            # for each point, convert to local UTM to buffer out a given
-            # distance then back to wgs84
-            point_geom = point_feature.GetGeometryRef()
-            x_val = point_geom.GetX()
-            if (x_val < -179.8) or (x_val > 179.8):
-                continue
-            utm_srs = calculate_utm_srs(point_geom.GetX(), point_geom.GetY())
-            utm_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-            wgs84_to_utm_transform = osr.CoordinateTransformation(
-                wgs84_srs, utm_srs)
-            utm_to_wgs84_transform = osr.CoordinateTransformation(
-                utm_srs, wgs84_srs)
-            point_geom.Transform(wgs84_to_utm_transform)
-            buffer_poly_geom = point_geom.Buffer(protective_distance)
-            buffer_poly_geom.Transform(utm_to_wgs84_transform)
-
-            buffer_point_feature = ogr.Feature(buffer_habitat_layer_defn)
-            buffer_point_feature.SetGeometry(buffer_poly_geom)
-
-            point_hab_service_val = point_feature.GetField(habitat_service_id)
-            if point_hab_service_val > 0:
-                buffer_point_feature.SetField(
-                    habitat_service_id, point_hab_service_val)
-                buffer_habitat_layer.CreateFeature(buffer_point_feature)
-            buffer_point_feature = None
-            point_feature = None
-            buffer_poly_geom = None
-            point_geom = None
-
-        # at this point every shore point has been buffered to the effective
-        # habitat distance and the habitat service has been saved with it
-        buffer_habitat_layer.CommitTransaction()
-        buffer_habitat_layer = None
-        buffer_habitat_vector = None
-        value_coverage_raster_path = os.path.join(
-            temp_workspace_dir, '%s_value_cover.tif' % hab_id)
-        LOGGER.info(f'create new value cover: {value_coverage_raster_path}')
-        geoprocessing.new_raster_from_base(
-            local_hab_raster_path, value_coverage_raster_path,
-            gdal.GDT_Float32, [0],
-            raster_driver_creation_tuple=(
-                'GTIFF', (
-                    'TILED=YES', 'BIGTIFF=YES', 'COMPRESS=LZW',
-                    'BLOCKXSIZE=256', 'BLOCKYSIZE=256',)))
-        LOGGER.info(f'''rasterizing {buffer_habitat_path} onto {
-            value_coverage_raster_path} with attribute id {
-            habitat_service_id}''')
-        geoprocessing.rasterize(
-            buffer_habitat_path, value_coverage_raster_path,
-            option_list=[
-                'ATTRIBUTE=%s' % habitat_service_id,
-                'MERGE_ALG=ADD'])
-
-        habitat_value_raster_path = os.path.join(
-            results_dir, '%s_value.tif' % hab_id)
-
-        value_coverage_nodata = geoprocessing.get_raster_info(
-            value_coverage_raster_path)['nodata'][0]
-        hab_nodata = geoprocessing.get_raster_info(
-            local_hab_raster_path)['nodata'][0]
-
-        if nohab_raster_path is None:
-            aligned_value_hab_raster_path_list = align_raster_list(
-                [value_coverage_raster_path, local_hab_raster_path],
-                temp_workspace_dir)
-
-            geoprocessing.raster_calculator(
-                [(aligned_value_hab_raster_path_list[0], 1),
-                 (aligned_value_hab_raster_path_list[1], 1),
-                 (numpy.array([[0]])),
-                 (value_coverage_nodata, 'raw'), (hab_nodata, 'raw')],
-                intersect_raster_op, habitat_value_raster_path,
-                gdal.GDT_Float32, value_coverage_nodata)
-        else:
-            aligned_value_hab_raster_path_list = align_raster_list(
-                [value_coverage_raster_path, local_hab_raster_path,
-                 nohab_raster_path], temp_workspace_dir)
-
-            geoprocessing.raster_calculator(
-                [(aligned_value_hab_raster_path_list[0], 1),
-                 (aligned_value_hab_raster_path_list[1], 1),
-                 (aligned_value_hab_raster_path_list[2], 1),
-                 (value_coverage_nodata, 'raw'), (hab_nodata, 'raw')],
-                intersect_raster_op, habitat_value_raster_path,
-                gdal.GDT_Float32, value_coverage_nodata)
-
-        hab_value_raster_path_list.append(habitat_value_raster_path)
+    for task in task_list:
+        hab_value_raster_path_list.append(task.get())
 
     total_value_sum_raster_path = os.path.join(
         results_dir, 'total_value_sum.tif')
+    LOGGER.info('calculate final total hab value')
     geoprocessing.raster_calculator(
         [(path, 1) for path in hab_value_raster_path_list],
         _add_op, total_value_sum_raster_path, gdal.GDT_Float32,
-        value_coverage_nodata)
+        _VALUE_COVER_NODATA)
+
+
+def _process_hab(
+        shore_sample_point_vector_path, key, temp_workspace_dir,
+        hab_raster_path_list, target_pixel_size,
+        nohab_raster_path):
+
+    gpkg_driver = ogr.GetDriverByName('gpkg')
+    shore_sample_point_vector = gdal.OpenEx(
+        shore_sample_point_vector_path, gdal.OF_VECTOR)
+    shore_sample_point_layer = shore_sample_point_vector.GetLayer()
+    shore_point_info = geoprocessing.get_vector_info(
+        shore_sample_point_vector_path)
+
+    (hab_id, risk, protective_distance) = key
+    local_hab_raster_path = os.path.join(
+        temp_workspace_dir, f'{hab_id}.tif')
+
+    local_clip_stack = []
+    for hab_raster_path in hab_raster_path_list:
+        basename = os.path.basename(os.path.splitext(hab_raster_path)[0])
+        local_clip_raster_path = os.path.join(
+            temp_workspace_dir, f'{basename}.tif')
+        clip_and_reproject_raster(
+            hab_raster_path, local_clip_raster_path,
+            shore_point_info['projection_wkt'],
+            shore_point_info['bounding_box'], None, 'near', False,
+            target_pixel_size)
+        local_clip_stack.append(local_clip_raster_path)
+    merge_mask_list(local_clip_stack, local_hab_raster_path)
+
+    if nohab_raster_path is not None:
+        LOGGER.info(
+            f'unmasking {local_hab_raster_path} with '
+            f'{nohab_raster_path}')
+        local_habknockout_hab_raster_path = os.path.join(
+            temp_workspace_dir, f'habknockout_{hab_id}.tif')
+        unmask_raster(
+            local_hab_raster_path, nohab_raster_path,
+            local_habknockout_hab_raster_path)
+        local_hab_raster_path = local_habknockout_hab_raster_path
+
+    habitat_service_id = 'Rt_habservice_%s' % hab_id
+    buffer_habitat_path = os.path.join(
+        temp_workspace_dir, '%s_buffer.gpkg' % hab_id)
+    buffer_habitat_vector = gpkg_driver.CreateDataSource(
+        buffer_habitat_path)
+    wgs84_srs = osr.SpatialReference()
+    wgs84_srs.ImportFromEPSG(4326)
+    wgs84_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    buffer_habitat_layer = (
+        buffer_habitat_vector.CreateLayer(
+            habitat_service_id, wgs84_srs, ogr.wkbPolygon))
+    buffer_habitat_layer.CreateField(ogr.FieldDefn(
+        habitat_service_id, ogr.OFTReal))
+    buffer_habitat_layer_defn = buffer_habitat_layer.GetLayerDefn()
+
+    shore_sample_point_layer.ResetReading()
+    buffer_habitat_layer.StartTransaction()
+    for point_index, point_feature in enumerate(shore_sample_point_layer):
+        if point_index % 1000 == 0:
+            LOGGER.debug(
+                'point buffering is %.2f%% complete',
+                point_index / shore_sample_point_layer.GetFeatureCount() *
+                100.0)
+        # for each point, convert to local UTM to buffer out a given
+        # distance then back to wgs84
+        point_geom = point_feature.GetGeometryRef()
+        x_val = point_geom.GetX()
+        if (x_val < -179.8) or (x_val > 179.8):
+            continue
+        utm_srs = calculate_utm_srs(point_geom.GetX(), point_geom.GetY())
+        utm_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        wgs84_to_utm_transform = osr.CoordinateTransformation(
+            wgs84_srs, utm_srs)
+        utm_to_wgs84_transform = osr.CoordinateTransformation(
+            utm_srs, wgs84_srs)
+        point_geom.Transform(wgs84_to_utm_transform)
+        buffer_poly_geom = point_geom.Buffer(protective_distance)
+        buffer_poly_geom.Transform(utm_to_wgs84_transform)
+
+        buffer_point_feature = ogr.Feature(buffer_habitat_layer_defn)
+        buffer_point_feature.SetGeometry(buffer_poly_geom)
+
+        point_hab_service_val = point_feature.GetField(habitat_service_id)
+        if point_hab_service_val > 0:
+            buffer_point_feature.SetField(
+                habitat_service_id, point_hab_service_val)
+            buffer_habitat_layer.CreateFeature(buffer_point_feature)
+        buffer_point_feature = None
+        point_feature = None
+        buffer_poly_geom = None
+        point_geom = None
+
+    # at this point every shore point has been buffered to the effective
+    # habitat distance and the habitat service has been saved with it
+    buffer_habitat_layer.CommitTransaction()
+    buffer_habitat_layer = None
+    buffer_habitat_vector = None
+    value_coverage_raster_path = os.path.join(
+        temp_workspace_dir, '%s_value_cover.tif' % hab_id)
+    LOGGER.info(f'create new value cover: {value_coverage_raster_path}')
+    geoprocessing.new_raster_from_base(
+        local_hab_raster_path, value_coverage_raster_path,
+        gdal.GDT_Float32, [_VALUE_COVER_NODATA],
+        raster_driver_creation_tuple=(
+            'GTIFF', (
+                'TILED=YES', 'BIGTIFF=YES', 'COMPRESS=LZW',
+                'BLOCKXSIZE=256', 'BLOCKYSIZE=256',)))
+    LOGGER.info(f'''rasterizing {buffer_habitat_path} onto {
+        value_coverage_raster_path} with attribute id {
+        habitat_service_id}''')
+    geoprocessing.rasterize(
+        buffer_habitat_path, value_coverage_raster_path,
+        option_list=[
+            'ATTRIBUTE=%s' % habitat_service_id,
+            'MERGE_ALG=ADD'])
+
+    habitat_value_raster_path = os.path.join(
+        results_dir, '%s_value.tif' % hab_id)
+
+    value_coverage_nodata = geoprocessing.get_raster_info(
+        value_coverage_raster_path)['nodata'][0]
+    hab_nodata = geoprocessing.get_raster_info(
+        local_hab_raster_path)['nodata'][0]
+
+    if nohab_raster_path is None:
+        aligned_value_hab_raster_path_list = align_raster_list(
+            [value_coverage_raster_path, local_hab_raster_path],
+            temp_workspace_dir)
+
+        geoprocessing.raster_calculator(
+            [(aligned_value_hab_raster_path_list[0], 1),
+             (aligned_value_hab_raster_path_list[1], 1),
+             (numpy.array([[0]])),
+             (value_coverage_nodata, 'raw'), (hab_nodata, 'raw')],
+            intersect_raster_op, habitat_value_raster_path,
+            gdal.GDT_Float32, value_coverage_nodata)
+    else:
+        aligned_value_hab_raster_path_list = align_raster_list(
+            [value_coverage_raster_path, local_hab_raster_path,
+             nohab_raster_path], temp_workspace_dir)
+
+        geoprocessing.raster_calculator(
+            [(aligned_value_hab_raster_path_list[0], 1),
+             (aligned_value_hab_raster_path_list[1], 1),
+             (aligned_value_hab_raster_path_list[2], 1),
+             (value_coverage_nodata, 'raw'), (hab_nodata, 'raw')],
+            intersect_raster_op, habitat_value_raster_path,
+            gdal.GDT_Float32, value_coverage_nodata)
 
     shore_sample_point_vector = None
     shore_sample_point_layer = None
+
+    return habitat_value_raster_path
 
 
 def _add_op(*array_list):
@@ -2704,13 +2727,9 @@ def main():
         calculate_cv_vector_task.join()
 
         LOGGER.info('starting hab value calc')
-        task_graph.add_task(
-            func=calculate_habitat_value,
-            args=(
-                target_cv_vector_path, scenario_config,
-                local_habitat_value_dir),
-            dependent_task_list=[calculate_cv_vector_task],
-            task_name=f'calculate habitat value for {scenario_id}')
+        calculate_habitat_value(
+            task_graph, target_cv_vector_path, scenario_config,
+            local_habitat_value_dir)
 
     task_graph.join()
     task_graph.close()
