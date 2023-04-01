@@ -2233,6 +2233,8 @@ def _process_hab(
     habitat_service_id = 'Rt_habservice_%s' % hab_id
     buffer_habitat_path = os.path.join(
         temp_workspace_dir, '%s_buffer.gpkg' % hab_id)
+    if os.path.exists(buffer_habitat_path):
+        os.remove(buffer_habitat_path)
     buffer_habitat_vector = gpkg_driver.CreateDataSource(
         buffer_habitat_path)
     wgs84_srs = osr.SpatialReference()
