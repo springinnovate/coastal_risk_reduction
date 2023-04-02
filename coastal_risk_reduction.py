@@ -2231,7 +2231,7 @@ def _process_hab(
             local_habknockout_hab_raster_path)
         local_hab_raster_path = local_habknockout_hab_raster_path
 
-    habitat_service_id = 'Rt_habservice_%s' % hab_suffix
+    habitat_service_id = 'Rt_habservice_%s' % hab_id
     buffer_habitat_path = os.path.join(
         temp_workspace_dir, '%s_buffer.gpkg' % hab_suffix)
     if os.path.exists(buffer_habitat_path):
@@ -2291,7 +2291,7 @@ def _process_hab(
     buffer_habitat_layer = None
     buffer_habitat_vector = None
     value_coverage_raster_path = os.path.join(
-        temp_workspace_dir, '%s_value_cover.tif' % hab_id)
+        temp_workspace_dir, '%s_value_cover.tif' % hab_suffix)
     LOGGER.info(f'create new value cover: {value_coverage_raster_path}')
     geoprocessing.new_raster_from_base(
         local_hab_raster_path, value_coverage_raster_path,
@@ -2310,7 +2310,7 @@ def _process_hab(
             'MERGE_ALG=ADD'])
 
     habitat_value_raster_path = os.path.join(
-        results_dir, '%s_value.tif' % hab_id)
+        results_dir, '%s_value.tif' % hab_suffix)
 
     value_coverage_nodata = geoprocessing.get_raster_info(
         value_coverage_raster_path)['nodata'][0]
