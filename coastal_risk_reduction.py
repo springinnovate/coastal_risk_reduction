@@ -2203,8 +2203,9 @@ def _process_hab(
         shore_sample_point_vector_path)
 
     (hab_id, risk, protective_distance) = key
+    hab_suffix = f'{hab_id}_{risk}_{protective_distance}'
     local_hab_raster_path = os.path.join(
-        temp_workspace_dir, f'{hab_id}.tif')
+        temp_workspace_dir, f'{hab_suffix}.tif')
 
     local_clip_stack = []
     for hab_raster_path in hab_raster_path_list:
@@ -2224,15 +2225,15 @@ def _process_hab(
             f'unmasking {local_hab_raster_path} with '
             f'{nohab_raster_path}')
         local_habknockout_hab_raster_path = os.path.join(
-            temp_workspace_dir, f'habknockout_{hab_id}.tif')
+            temp_workspace_dir, f'habknockout_{hab_suffix}.tif')
         unmask_raster(
             local_hab_raster_path, nohab_raster_path,
             local_habknockout_hab_raster_path)
         local_hab_raster_path = local_habknockout_hab_raster_path
 
-    habitat_service_id = 'Rt_habservice_%s' % hab_id
+    habitat_service_id = 'Rt_habservice_%s' % hab_suffix
     buffer_habitat_path = os.path.join(
-        temp_workspace_dir, '%s_buffer.gpkg' % hab_id)
+        temp_workspace_dir, '%s_buffer.gpkg' % hab_suffix)
     if os.path.exists(buffer_habitat_path):
         os.remove(buffer_habitat_path)
     buffer_habitat_vector = gpkg_driver.CreateDataSource(
