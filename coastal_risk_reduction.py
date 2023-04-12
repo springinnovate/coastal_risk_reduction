@@ -2029,8 +2029,6 @@ def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
                 numpy.sum([x**2 for x in risk_diff_list]) -
                 max(risk_diff_list)**2)
             feature.SetField('Rhab_all', r_nohab)
-            LOGGER.debug(f'{r_nohab} {risk_diff_list} {habitat_fieldname_list}')
-            sys.exit(-1)
 
             # Rt
             exposure_index = 1.0
