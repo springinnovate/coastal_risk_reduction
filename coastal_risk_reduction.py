@@ -17,6 +17,8 @@ import threading
 import types
 from numbers import Number
 
+from shapely.geometry import MultiPoint, Polygon
+from scipy.spatial import Voronoi
 from ecoshard import geoprocessing
 from ecoshard import taskgraph
 from osgeo import gdal
@@ -283,6 +285,12 @@ def cv_grid_worker(
                 sample_line_to_points(
                     local_geomorphology_vector_path, shore_point_vector_path,
                     shore_point_sample_distance)
+
+                shore_aoi_region_vector_path = os.path.join(
+                    workspace_dir, 'coast_aoi_regions.gpkg')
+                voroni_polygons_from_points(
+                    shore_point_vector_path, shore_aoi_region_vector_path)
+                break
 
                 local_landmass_vector_path = os.path.join(
                     workspace_dir, 'landmass.gpkg')
@@ -1241,6 +1249,77 @@ def clip_geometry(
                     field_name,
                     strtree_object_list[index].field_val_map[field_name])
         layer.CreateFeature(feature)
+
+
+def voroni_polygons_from_points(
+        point_vector_path, voroni_poly_vector_path):
+    """Convert points to voroni polygons.
+
+    Parameters:
+        point_vector_path (str): path to point based vector
+        voroni_poly_vector_path (str): path to vector to create on output
+
+    Returns:
+        None.
+    """
+    # Step 1: Read points from input GPKG using GDAL
+    dataSource = ogr.Open(point_vector_path, 0)
+    layer = dataSource.GetLayer()
+
+    # Extract SRS from the point layer
+    srs = layer.GetSpatialRef()
+
+    points_list = []
+    for feature in layer:
+        geom = feature.GetGeometryRef()
+        points_list.append((geom.GetX(), geom.GetY()))
+    LOGGER.debug(f'{len(points_list)} -- {points_list}')
+
+    # Step 2: Convert to a list of shapely geometries
+    multi_point = MultiPoint(points_list)
+
+    # Step 3: Create the Voronoi tessellation using shapely and scipy
+    vor = Voronoi(points_list)
+    LOGGER.debug(f'{len(vor.regions)}')
+
+    # Create polygons for each voronoi region, clipped to the convex hull of
+    # input points
+    hull_polygon = multi_point.convex_hull.buffer(100)
+    LOGGER.debug(f'*********** {hull_polygon}')
+    LOGGER.debug(f'*********** {points_list}')
+    polygons = [
+        Polygon(vor.vertices[region]).intersection(hull_polygon)
+        for region in vor.regions if -1 not in region and len(region) > 0]
+    LOGGER.debug(f'************ {polygons}')
+
+    # Step 4: Use GDAL to write the Voronoi polygons to output GPKG
+
+    # Check and delete if the file already exists
+    if os.path.exists(voroni_poly_vector_path):
+        os.remove(voroni_poly_vector_path)
+
+    # Create the output driver and file
+    driver = ogr.GetDriverByName('GPKG')
+    ds = driver.CreateDataSource(voroni_poly_vector_path)
+    layer = ds.CreateLayer(
+        'voronoi_polygons', geom_type=ogr.wkbPolygon, srs=srs)
+
+    # Define a simple field
+    fieldDefn = ogr.FieldDefn("ID", ogr.OFTInteger)
+    layer.CreateField(fieldDefn)
+
+    # Loop through shapely polygons and write to GPKG
+    for idx, poly in enumerate(polygons):
+        outFeature = ogr.Feature(layer.GetLayerDefn())
+        outFeature.SetField("ID", idx)
+        geom = ogr.CreateGeometryFromWkt(poly.wkt)
+        outFeature.SetGeometry(geom)
+        layer.CreateFeature(outFeature)
+        outFeature = None
+
+    # Close datasets
+    ds = None
+    dataSource = None
 
 
 def sample_line_to_points(
@@ -2577,6 +2656,7 @@ def calculate_degree_cell_cv(
             continue
         bb_work_queue.put((index, boundary_box.bounds))
         n_boxes += 1
+        break
 
     for worker_id in range(min(MAX_WORKERS, n_boxes+1, int(multiprocessing.cpu_count()))):
         cv_grid_worker_thread = multiprocessing.Process(
@@ -2623,8 +2703,8 @@ def calculate_degree_cell_cv(
     merge_cv_points_and_add_risk_thread.join()
 
     LOGGER.debug('calculate cv vector risk')
-    # add_cv_vector_risk(
-    #     list(set(habitat_fieldname_list)), target_cv_vector_path)
+    add_cv_vector_risk(
+     list(set(habitat_fieldname_list)), target_cv_vector_path)
 
 
 def _process_scenario_ini(scenario_config_path):
