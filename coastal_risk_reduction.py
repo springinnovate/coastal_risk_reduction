@@ -17,13 +17,15 @@ import threading
 import types
 from numbers import Number
 
-from shapely.geometry import MultiPoint, Polygon
-from scipy.spatial import Voronoi
 from ecoshard import geoprocessing
 from ecoshard import taskgraph
 from osgeo import gdal
 from osgeo import ogr
 from osgeo import osr
+from scipy.spatial import Voronoi
+from shapely.geometry import MultiPoint, Polygon, GeometryCollection
+from shapely.ops import voronoi_diagram
+import shapely.ops
 import numpy
 import retrying
 import shapely.errors
@@ -216,7 +218,7 @@ def cv_grid_worker(
         gegeomorphology_proj.ImportFromWkt(geomorphology_proj_wkt)
 
         shore_point_sample_distance = float(local_data_path_map[
-            'shore_point_sample_distance'])
+            SHORE_POINT_SAMPLE_DISTANCE_KEY])
         target_pixel_size = [
             shore_point_sample_distance / 4, -shore_point_sample_distance / 4]
 
@@ -289,7 +291,9 @@ def cv_grid_worker(
                 shore_aoi_region_vector_path = os.path.join(
                     workspace_dir, 'coast_aoi_regions.gpkg')
                 voroni_polygons_from_points(
-                    shore_point_vector_path, shore_aoi_region_vector_path)
+                    shore_point_vector_path,
+                    shore_point_sample_distance,
+                    shore_aoi_region_vector_path)
                 break
 
                 local_landmass_vector_path = os.path.join(
@@ -1252,7 +1256,7 @@ def clip_geometry(
 
 
 def voroni_polygons_from_points(
-        point_vector_path, voroni_poly_vector_path):
+        point_vector_path, shore_point_sample_distance, voroni_poly_vector_path):
     """Convert points to voroni polygons.
 
     Parameters:
@@ -1268,6 +1272,7 @@ def voroni_polygons_from_points(
 
     # Extract SRS from the point layer
     srs = layer.GetSpatialRef()
+    driver = ogr.GetDriverByName('GPKG')
 
     points_list = []
     for feature in layer:
@@ -1275,31 +1280,52 @@ def voroni_polygons_from_points(
         points_list.append((geom.GetX(), geom.GetY()))
     LOGGER.debug(f'{len(points_list)} -- {points_list}')
 
-    # Step 2: Convert to a list of shapely geometries
-    multi_point = MultiPoint(points_list)
+    points = MultiPoint(points_list)
+    buffered_convex_hull = points.convex_hull.buffer(5000)
+    regions = voronoi_diagram(points, envelope=buffered_convex_hull.envelope)
+    #regions = shapely.intersection(buffered_convex_hull, regions)
 
-    # Step 3: Create the Voronoi tessellation using shapely and scipy
-    vor = Voronoi(points_list)
-    LOGGER.debug(f'{len(vor.regions)}')
+    regions = GeometryCollection([
+        geom.intersection(buffered_convex_hull)
+        for geom in regions.geoms if geom.intersects(buffered_convex_hull)])
 
-    # Create polygons for each voronoi region, clipped to the convex hull of
-    # input points
-    hull_polygon = multi_point.convex_hull.buffer(100)
-    LOGGER.debug(f'*********** {hull_polygon}')
-    LOGGER.debug(f'*********** {points_list}')
-    polygons = [
-        Polygon(vor.vertices[region]).intersection(hull_polygon)
-        for region in vor.regions if -1 not in region and len(region) > 0]
-    LOGGER.debug(f'************ {polygons}')
+    resulting_geometries = []
+    for geom in regions.geoms:
+        # Filter out the current polygon from the GeometryCollection
+        other_geoms = [g for g in regions.geoms if g != geom]
 
-    # Step 4: Use GDAL to write the Voronoi polygons to output GPKG
+        # Buffer the other polygons
+        buffered_geoms = [g.buffer(shore_point_sample_distance) for g in other_geoms]
+
+        # Compute the union of the buffered polygons
+        union_buffered = shapely.ops.unary_union(buffered_geoms)
+
+        # Intersect the current geometry with the union of buffered ones
+        intersected = geom.intersection(union_buffered)
+
+        resulting_geometries.append(intersected)
+
+    regions = GeometryCollection(resulting_geometries)
+
+    ds = driver.CreateDataSource(
+        '%s_regionbuffer%s' % os.path.splitext(voroni_poly_vector_path))
+    layer = ds.CreateLayer(
+        'buffer', geom_type=ogr.wkbPolygon, srs=srs)
+
+    # Define a simple field
+    fieldDefn = ogr.FieldDefn("ID", ogr.OFTInteger)
+    layer.CreateField(fieldDefn)
+    outFeature = ogr.Feature(layer.GetLayerDefn())
+    geom = ogr.CreateGeometryFromWkb(regions.wkb)
+    outFeature.SetGeometry(geom)
+    layer.CreateFeature(outFeature)
+    outFeature = None
 
     # Check and delete if the file already exists
     if os.path.exists(voroni_poly_vector_path):
         os.remove(voroni_poly_vector_path)
 
     # Create the output driver and file
-    driver = ogr.GetDriverByName('GPKG')
     ds = driver.CreateDataSource(voroni_poly_vector_path)
     layer = ds.CreateLayer(
         'voronoi_polygons', geom_type=ogr.wkbPolygon, srs=srs)
@@ -1309,13 +1335,28 @@ def voroni_polygons_from_points(
     layer.CreateField(fieldDefn)
 
     # Loop through shapely polygons and write to GPKG
-    for idx, poly in enumerate(polygons):
+    for idx, poly in enumerate(regions.geoms):
         outFeature = ogr.Feature(layer.GetLayerDefn())
         outFeature.SetField("ID", idx)
-        geom = ogr.CreateGeometryFromWkt(poly.wkt)
+        geom = ogr.CreateGeometryFromWkb(poly.wkb)
         outFeature.SetGeometry(geom)
         layer.CreateFeature(outFeature)
         outFeature = None
+
+
+    ds = driver.CreateDataSource(
+        '%s_buffer%s' % os.path.splitext(voroni_poly_vector_path))
+    layer = ds.CreateLayer(
+        'buffer', geom_type=ogr.wkbPolygon, srs=srs)
+
+    # Define a simple field
+    fieldDefn = ogr.FieldDefn("ID", ogr.OFTInteger)
+    layer.CreateField(fieldDefn)
+    outFeature = ogr.Feature(layer.GetLayerDefn())
+    geom = ogr.CreateGeometryFromWkb(buffered_convex_hull.wkb)
+    outFeature.SetGeometry(geom)
+    layer.CreateFeature(outFeature)
+    outFeature = None
 
     # Close datasets
     ds = None
