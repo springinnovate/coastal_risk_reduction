@@ -1825,22 +1825,10 @@ def merge_cv_points_and_add_risk(
 
     """
     try:
-        # gpkg_driver = ogr.GetDriverByName('GPKG')
-        # target_cv_vector = gpkg_driver.CreateDataSource(target_cv_vector_path)
-        # layer_name = os.path.basename(os.path.splitext(target_cv_vector_path)[0])
-        # wgs84_srs = osr.SpatialReference()
-        # wgs84_srs.ImportFromEPSG(4326)
-        # wgs84_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-        # target_cv_layer = (
-        #     target_cv_vector.CreateLayer(layer_name, wgs84_srs, ogr.wkbPoint))
-        # target_cv_layer.StartTransaction()
-
-        # fields_to_copy = []
         if os.path.exists(target_cv_vector_path):
             os.remove(target_cv_vector_path)
         payload_count = 0
         start_time = time.time()
-        #cv_vector_path_list = []
         result = None
         while True:
             cv_vector_path = cv_vector_queue.get()
@@ -1849,64 +1837,21 @@ def merge_cv_points_and_add_risk(
                 break
             add_cv_vector_risk(
                 habitat_fieldname_list, cv_vector_path)
-
-            # to_merge_path = os.path.join(
-            #     directory_to_merge, os.path.basename(cv_vector_path))
             if not os.path.exists(target_cv_vector_path):
                 shutil.copy(cv_vector_path, target_cv_vector_path)
                 cmd = f'ogr2ogr -f "GPKG" -t_srs EPSG:4326 {target_cv_vector_path} {cv_vector_path}'
             else:
                 cmd = f'ogr2ogr -f "GPKG" -t_srs EPSG:4326 -update -append {target_cv_vector_path} {cv_vector_path}'
-            #result_str = subprocess.check_output(cmd, shell=True)
             if result is not None:
                 result.wait()
             result = subprocess.Popen(cmd, shell=True)
             LOGGER.info(result)
-
-            # cv_vector = gdal.OpenEx(cv_vector_path, gdal.OF_VECTOR)
-            # cv_layer = cv_vector.GetLayer()
-            # cv_layer_defn = cv_layer.GetLayerDefn()
-            # if not fields_to_copy:
-            #     # create the initial set of fields
-            #     for fld_index in range(cv_layer_defn.GetFieldCount()):
-            #         original_field = cv_layer_defn.GetFieldDefn(fld_index)
-            #         field_name = original_field.GetName()
-            #         target_field = ogr.FieldDefn(
-            #             field_name, original_field.GetType())
-            #         target_cv_layer.CreateField(target_field)
-            #         fields_to_copy.append(field_name)
-
-            # target_cv_layer_defn = target_cv_layer.GetLayerDefn()
-            # cv_projection = cv_layer.GetSpatialRef()
-            # cv_projection.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-            # base_to_target_transform = osr.CoordinateTransformation(
-            #     cv_projection, wgs84_srs)
-
-            # for cv_feature in cv_layer:
-            #     cv_geom = cv_feature.GetGeometryRef().Clone()
-            #     _ = cv_geom.Transform(base_to_target_transform)
-            #     target_feature = ogr.Feature(target_cv_layer_defn)
-            #     target_feature.SetGeometry(cv_geom)
-            #     for field_id in fields_to_copy:
-            #         try:
-            #             target_feature.SetField(
-            #                 field_id, cv_feature.GetField(field_id))
-            #         except KeyError:
-            #             LOGGER.exception(f'********** field error in merge_cv_points_and_add_risk {field_id} {target_cv_layer_defn}')
-            #             sys.exit(-1)
-            #     target_cv_layer.CreateFeature(target_feature)
-            # cv_feature = None
-            # cv_geom = None
-            # cv_layer = None
-            # cv_vector = None
-
             expected_runtime = (expected_payload_count-payload_count) * (
                 time.time()-start_time)/payload_count
             LOGGER.info(
                 f'merge cv points {payload_count/expected_payload_count*100:.2f}% complete, '
                 f'expect {expected_runtime:.2f}s to complete')
         result.wait()
-        #target_cv_layer.CommitTransaction()
     except Exception:
         LOGGER.exception('error in merge_cv_points_and_add_risk')
     finally:
@@ -1948,7 +1893,10 @@ def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
                 ('slr', 'Rslr'), ('relief', 'Rrelief')]:
             LOGGER.info(f'set risk field for {base_field} {risk_field}')
             cv_risk_layer.CreateField(ogr.FieldDefn(risk_field, ogr.OFTReal))
-            base_array = numpy.empty(shape=(cv_risk_layer.GetFeatureCount(),))
+            n_features = cv_risk_layer.GetFeatureCount()
+            if n_features == 0:
+                continue
+            base_array = numpy.empty(shape=(n_features,))
             for index, feature in enumerate(cv_risk_layer):
                 base_array[index] = feature.GetField(base_field)
             nan_mask = numpy.isnan(base_array)
@@ -2196,6 +2144,7 @@ def _process_hab(
         nohab_raster_path, results_dir):
 
     gpkg_driver = ogr.GetDriverByName('gpkg')
+    LOGGER.debug(f'********* processing hab on {shore_sample_point_vector_path}')
     shore_sample_point_vector = gdal.OpenEx(
         shore_sample_point_vector_path, gdal.OF_VECTOR)
     shore_sample_point_layer = shore_sample_point_vector.GetLayer()
@@ -2275,6 +2224,7 @@ def _process_hab(
         buffer_point_feature = ogr.Feature(buffer_habitat_layer_defn)
         buffer_point_feature.SetGeometry(buffer_poly_geom)
 
+        LOGGER.debug(f'******** aobut to query {habitat_service_id} on point {point_index} of {shore_sample_point_vector_path}')
         point_hab_service_val = point_feature.GetField(habitat_service_id)
         if point_hab_service_val > 0:
             buffer_point_feature.SetField(
@@ -2392,7 +2342,7 @@ def align_raster_list(raster_path_list, target_directory):
     target_pixel_size = geoprocessing.get_raster_info(
         raster_path_list[0])['pixel_size']
     LOGGER.debug('about to align: %s', str(raster_path_list))
-    task_graph.add_task(
+    align_task = task_graph.add_task(
         func=geoprocessing.align_and_resize_raster_stack,
         args=(
             raster_path_list, aligned_path_list,
@@ -2400,6 +2350,7 @@ def align_raster_list(raster_path_list, target_directory):
             'intersection'),
         target_path_list=aligned_path_list,
         task_name=f'align raster list for {raster_path_list}')
+    align_task.join()
     return aligned_path_list
 
 
@@ -2577,6 +2528,8 @@ def calculate_degree_cell_cv(
             continue
         bb_work_queue.put((index, boundary_box.bounds))
         n_boxes += 1
+        if n_boxes > 2:
+            break
 
     for worker_id in range(min(MAX_WORKERS, n_boxes+1, int(multiprocessing.cpu_count()))):
         cv_grid_worker_thread = multiprocessing.Process(
