@@ -2117,10 +2117,12 @@ def calculate_habitat_value(
         if key == NOHAB_ID:
             # already processed above
             continue
+        process_hab_temp_workdir = os.path.join(temp_workspace_dir, str(key))
+        os.makedirs(process_hab_temp_workdir, exist_ok=True)
         process_hab_task = task_graph.add_task(
             func=_process_hab,
             args=(
-                shore_sample_point_vector_path, key, temp_workspace_dir,
+                shore_sample_point_vector_path, key, process_hab_temp_workdir,
                 hab_raster_path_list, target_pixel_size,
                 nohab_raster_path, results_dir),
             store_result=True)
@@ -2341,16 +2343,18 @@ def align_raster_list(raster_path_list, target_directory):
         for path in raster_path_list]
     target_pixel_size = geoprocessing.get_raster_info(
         raster_path_list[0])['pixel_size']
-    LOGGER.debug('about to align: %s', str(raster_path_list))
-    align_task = task_graph.add_task(
+    LOGGER.debug(
+        f'about to align: {raster_path_list} in directory {target_directory}')
+    task_graph.add_task(
         func=geoprocessing.align_and_resize_raster_stack,
         args=(
             raster_path_list, aligned_path_list,
             ['near'] * len(raster_path_list), target_pixel_size,
             'intersection'),
         target_path_list=aligned_path_list,
-        task_name=f'align raster list for {raster_path_list}')
-    align_task.join()
+        task_name=(
+            f'align raster list for {raster_path_list} to '
+            f'{aligned_path_list}'))
     return aligned_path_list
 
 
@@ -2666,11 +2670,13 @@ def main():
     LOGGER.debug('starting')
     parser = argparse.ArgumentParser(description='Global CV analysis')
     parser.add_argument(
-        'scenario_config_path',
+        'scenario_config_path', nargs='+',
         help='Pattern to .INI file(s) that describes scenario(s) to run.')
     args = parser.parse_args()
 
-    scenario_config_path_list = list(glob.glob(args.scenario_config_path))
+    scenario_config_path_list = [
+        path for pattern in args.scenario_config_path
+        for path in glob.glob(pattern)]
     LOGGER.info(f'''parsing and validating {
         len(scenario_config_path_list)} configuration files''')
     config_scenario_list = []
