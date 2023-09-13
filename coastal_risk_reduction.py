@@ -2670,6 +2670,9 @@ def main():
     parser.add_argument(
         'scenario_config_path', nargs='+',
         help='Pattern to .INI file(s) that describes scenario(s) to run.')
+    parser.add_argument(
+        '--calc_hab_value_rasters', action='store_true',
+        help='pass if you want to do hab raster calc')
     args = parser.parse_args()
 
     scenario_config_path_list = [
@@ -2706,9 +2709,10 @@ def main():
         calculate_cv_vector_task.join()
 
         LOGGER.info('starting hab value calc')
-        calculate_habitat_value(
-            target_cv_vector_path, scenario_config,
-            local_habitat_value_dir)
+        if args.calc_hab_value_rasters:
+            calculate_habitat_value(
+                target_cv_vector_path, scenario_config,
+                local_habitat_value_dir)
 
     task_graph.join()
     task_graph.close()
