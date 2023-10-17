@@ -114,6 +114,7 @@ def voroni_polygons_from_points(
     shore_point_aoi_vector = None
     point_vector = None
 
+
 def main():
     LOGGER.debug('starting')
     parser = argparse.ArgumentParser(description='Global CV analysis')
@@ -129,6 +130,7 @@ def main():
         args.shore_point_vector_path,
         args.max_sample_distance,
         args.shore_wedge_vector_path)
+
 
 if __name__ == '__main__':
     main()

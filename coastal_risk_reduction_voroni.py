@@ -2915,10 +2915,12 @@ def main():
             scenario_config_path)
         config_scenario_list.append((scenario_config, scenario_id))
 
+    task_graph_list = []
     for scenario_config, scenario_id in config_scenario_list:
         workspace_dir = scenario_config['workspace_dir']
-        os.makedirs(workspace_dir, exist_ok=True)
         task_graph = taskgraph.TaskGraph(workspace_dir, -1)
+        task_graph_list.append(task_graph)
+        os.makedirs(workspace_dir, exist_ok=True)
         local_workspace_dir = os.path.join(workspace_dir, scenario_id)
         local_habitat_value_dir = os.path.join(
             workspace_dir, scenario_id, 'value_rasters')
@@ -2942,8 +2944,10 @@ def main():
             target_cv_vector_path, scenario_config,
             local_habitat_value_dir)
 
-    task_graph.join()
-    task_graph.close()
+    for task_graph in task_graph_list:
+        task_graph.join()
+        task_graph.close()
+
     LOGGER.info('completed successfully')
 
 
