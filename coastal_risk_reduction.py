@@ -22,6 +22,10 @@ from ecoshard import taskgraph
 from osgeo import gdal
 from osgeo import ogr
 from osgeo import osr
+from scipy.spatial import Voronoi
+from shapely.geometry import MultiPoint, Polygon, GeometryCollection
+from shapely.ops import voronoi_diagram
+import shapely.ops
 import numpy
 import retrying
 import shapely.errors
@@ -214,9 +218,18 @@ def cv_grid_worker(
         gegeomorphology_proj.ImportFromWkt(geomorphology_proj_wkt)
 
         shore_point_sample_distance = float(local_data_path_map[
-            'shore_point_sample_distance'])
+            SHORE_POINT_SAMPLE_DISTANCE_KEY])
         target_pixel_size = [
             shore_point_sample_distance / 4, -shore_point_sample_distance / 4]
+
+        LOGGER.debug(f'******************** {local_data_path_map[HABITAT_MAP_KEY]}')
+        max_sample_distance = max([
+            v[1] for v in eval(local_data_path_map[HABITAT_MAP_KEY]).values()])
+
+        max_sample_distance = max([max_sample_distance] + [
+            0 if not isinstance(v, tuple) else v[2]
+            for v in eval(local_data_path_map[LULC_CODE_TO_HAB_MAP_KEY]).values()
+            ])
 
         risk_distance_lucode_map = _parse_lulc_code_to_hab(eval(
             local_data_path_map['lulc_code_to_hab_map']))
@@ -358,8 +371,16 @@ def cv_grid_worker(
                     float(local_data_path_map['max_fetch_distance']),
                     'Rgeomorphology')
 
-                LOGGER.info('completed %s', shore_point_vector_path)
-                cv_point_complete_queue.put(shore_point_vector_path)
+                shore_aoi_region_vector_path = os.path.join(
+                    workspace_dir, 'coast_aoi_regions.gpkg')
+                voroni_polygons_from_points(
+                    shore_point_vector_path,
+                    shore_point_sample_distance,
+                    max_sample_distance,
+                    shore_aoi_region_vector_path)
+
+                LOGGER.info('completed %s', shore_aoi_region_vector_path)
+                cv_point_complete_queue.put(shore_aoi_region_vector_path)
 
             except Exception:
                 LOGGER.warning(
@@ -1241,6 +1262,70 @@ def clip_geometry(
                     field_name,
                     strtree_object_list[index].field_val_map[field_name])
         layer.CreateFeature(feature)
+
+
+def voroni_polygons_from_points(
+        point_vector_path, shore_point_sample_distance, max_sample_distance,
+        voroni_poly_vector_path):
+    """Convert points to voroni polygons.
+
+    Parameters:
+        point_vector_path (str): path to point based vector
+        voroni_poly_vector_path (str): path to vector to create on output
+
+    Returns:
+        None.
+    """
+    driver = ogr.GetDriverByName('GPKG')
+    point_vector = ogr.Open(point_vector_path, 0)
+    point_layer = point_vector.GetLayer()
+
+    srs = point_layer.GetSpatialRef()
+
+    # convert to shapely multipoint
+    points_list = []
+    for feature in point_layer:
+        geom = feature.GetGeometryRef()
+        points_list.append((geom.GetX(), geom.GetY()))
+    points = MultiPoint(points_list)
+    buffered_convex_hull = points.convex_hull.buffer(max_sample_distance)
+    regions = voronoi_diagram(points, envelope=buffered_convex_hull.envelope)
+    regions = GeometryCollection([
+        geom.intersection(buffered_convex_hull)
+        for geom in regions.geoms if geom.intersects(buffered_convex_hull)])
+
+    # Check and delete if the file already exists
+    if os.path.exists(voroni_poly_vector_path):
+        os.remove(voroni_poly_vector_path)
+
+    # Create the output driver and file
+    shore_point_aoi_vector = driver.CreateDataSource(voroni_poly_vector_path)
+    shore_point_aoi_layer = shore_point_aoi_vector.CreateLayer(
+        'shore_point_aoi', geom_type=ogr.wkbPolygon, srs=srs)
+    # Copy fields from point_layer to shore_point_aoi_layer
+    point_layer_defn = point_layer.GetLayerDefn()
+    for i in range(point_layer_defn.GetFieldCount()):
+        field_defn = point_layer_defn.GetFieldDefn(i)
+        shore_point_aoi_layer.CreateField(field_defn)
+
+    # Loop through shapely polygons and write to GPKG
+    point_layer.ResetReading()
+    for base_point_feature, poly in zip(point_layer, regions.geoms):
+        aoi_feature = ogr.Feature(shore_point_aoi_layer.GetLayerDefn())
+        for i in range(base_point_feature.GetFieldCount()):
+            field_name = base_point_feature.GetFieldDefnRef(i).GetName()
+            field_value = base_point_feature.GetField(i)
+            aoi_feature.SetField(field_name, field_value)
+
+        geom = ogr.CreateGeometryFromWkb(poly.wkb)
+        aoi_feature.SetGeometry(geom)
+        shore_point_aoi_layer.CreateFeature(aoi_feature)
+        aoi_feature = None
+
+    shore_point_aoi_layer = None
+    shore_point_aoi_vector = None
+    point_vector = None
+    point_vector = None
 
 
 def sample_line_to_points(
@@ -2532,6 +2617,7 @@ def calculate_degree_cell_cv(
             continue
         bb_work_queue.put((index, boundary_box.bounds))
         n_boxes += 1
+        break
 
     for worker_id in range(min(MAX_WORKERS, n_boxes+1, int(multiprocessing.cpu_count()))):
         cv_grid_worker_thread = multiprocessing.Process(
@@ -2578,8 +2664,8 @@ def calculate_degree_cell_cv(
     merge_cv_points_and_add_risk_thread.join()
 
     LOGGER.debug('calculate cv vector risk')
-    # add_cv_vector_risk(
-    #     list(set(habitat_fieldname_list)), target_cv_vector_path)
+    add_cv_vector_risk(
+     list(set(habitat_fieldname_list)), target_cv_vector_path)
 
 
 def _process_scenario_ini(scenario_config_path):
