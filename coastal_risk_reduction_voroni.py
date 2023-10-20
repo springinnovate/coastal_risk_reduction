@@ -1,5 +1,3 @@
-# TODO: get the smallest example set up to run
-
 """Global CV Analysis."""
 import glob
 import argparse
@@ -24,8 +22,7 @@ from ecoshard import taskgraph
 from osgeo import gdal
 from osgeo import ogr
 from osgeo import osr
-from scipy.spatial import Voronoi
-from shapely.geometry import MultiPoint, Polygon, GeometryCollection
+from shapely.geometry import MultiPoint, GeometryCollection
 from shapely.ops import voronoi_diagram
 import shapely.ops
 import numpy
@@ -254,6 +251,7 @@ def cv_grid_worker(
                 else:
                     LOGGER.debug('running')
                 # otherwise payload is the bounding box
+
                 index, (lng_min, lat_min, lng_max, lat_max) = payload
                 bounding_box_list = [lng_min, lat_min, lng_max, lat_max]
                 buffered_bounding_box_list = [
@@ -375,19 +373,55 @@ def cv_grid_worker(
 
                 shore_aoi_region_vector_path = os.path.join(
                     workspace_dir, 'coast_aoi_regions.gpkg')
+                shore_aoi_region_union_vector_path = os.path.join(
+                    workspace_dir, 'coast_aoi_region_union.gpkg')
                 voroni_polygons_from_points(
                     shore_point_vector_path,
-                    shore_point_sample_distance,
                     max_sample_distance,
-                    shore_aoi_region_vector_path)
+                    shore_aoi_region_vector_path,
+                    shore_aoi_region_union_vector_path)
 
                 LOGGER.info('completed %s', shore_aoi_region_vector_path)
-                cv_point_complete_queue.put(shore_aoi_region_vector_path)
+
+                # do wgs84 conversion
+                temp_shore_aoi_region_vector_path = os.path.join(
+                    os.path.dirname(shore_aoi_region_vector_path),
+                    f'temp_{os.path.basename(shore_aoi_region_vector_path)}')
+                shutil.copy(
+                    shore_aoi_region_vector_path,
+                    temp_shore_aoi_region_vector_path)
+                cmd = (
+                    f'ogr2ogr -f "GPKG" -t_srs EPSG:4326 '
+                    f'{shore_aoi_region_vector_path} '
+                    f'{temp_shore_aoi_region_vector_path}')
+                result = subprocess.Popen(cmd, shell=True)
+                result.wait()
+                os.remove(temp_shore_aoi_region_vector_path)
+                LOGGER.info(f'completed {cmd}')
+
+                temp_shore_aoi_region_union_vector_path = os.path.join(
+                    os.path.dirname(shore_aoi_region_union_vector_path),
+                    f'temp_{os.path.basename(shore_aoi_region_union_vector_path)}')
+                shutil.copy(
+                    shore_aoi_region_union_vector_path,
+                    temp_shore_aoi_region_union_vector_path)
+                cmd = (
+                    f'ogr2ogr -f "GPKG" -t_srs EPSG:4326 '
+                    f'{shore_aoi_region_union_vector_path} '
+                    f'{temp_shore_aoi_region_union_vector_path}')
+                result = subprocess.Popen(cmd, shell=True)
+                result.wait()
+                os.remove(temp_shore_aoi_region_union_vector_path)
+                LOGGER.info(f'completed {cmd}')
+
+                cv_point_complete_queue.put(
+                    (shore_aoi_region_vector_path,
+                     shore_aoi_region_union_vector_path))
 
             except Exception:
-                LOGGER.warning(
-                    f'error on {payload}, removing workspace, skipping')
-                retrying_rmtree(workspace_dir)
+                LOGGER.exception(
+                    f'************************** error on {payload}, removing workspace, skipping')
+                #retrying_rmtree(workspace_dir)
     except Exception:
         LOGGER.exception('something horrible happened on')
         raise
@@ -1267,8 +1301,8 @@ def clip_geometry(
 
 
 def voroni_polygons_from_points(
-        point_vector_path, shore_point_sample_distance, max_sample_distance,
-        voroni_poly_vector_path):
+        point_vector_path, max_sample_distance,
+        voroni_poly_vector_path, voroni_union_poly_vector_path):
     """Convert points to voroni polygons.
 
     Parameters:
@@ -1292,9 +1326,12 @@ def voroni_polygons_from_points(
     points = MultiPoint(points_list)
     buffered_convex_hull = points.convex_hull.buffer(max_sample_distance)
     regions = voronoi_diagram(points, envelope=buffered_convex_hull.envelope)
-    regions = GeometryCollection([
+    cleaned_regions = [
         geom.intersection(buffered_convex_hull)
-        for geom in regions.geoms if geom.intersects(buffered_convex_hull)])
+        for geom in regions.geoms if geom.intersects(buffered_convex_hull)]
+    regions = GeometryCollection(cleaned_regions)
+    region_union = shapely.ops.unary_union(
+        [geom for geom in cleaned_regions])
 
     # Check and delete if the file already exists
     if os.path.exists(voroni_poly_vector_path):
@@ -1324,10 +1361,29 @@ def voroni_polygons_from_points(
         shore_point_aoi_layer.CreateFeature(aoi_feature)
         aoi_feature = None
 
+    aoi_feature = None
     shore_point_aoi_layer = None
     shore_point_aoi_vector = None
     point_vector = None
-    point_vector = None
+
+    # Check and delete if the file already exists
+    if os.path.exists(voroni_union_poly_vector_path):
+        os.remove(voroni_union_poly_vector_path)
+
+    # Create the overall AOI for clipping
+    shore_point_aoi_union_vector = driver.CreateDataSource(
+        voroni_union_poly_vector_path)
+    shore_point_aoi_union_layer = shore_point_aoi_union_vector.CreateLayer(
+        'shore_point_aoi_union', geom_type=ogr.wkbPolygon, srs=srs)
+    aoi_union_feature = ogr.Feature(shore_point_aoi_union_layer.GetLayerDefn())
+    geom = ogr.CreateGeometryFromWkb(region_union.wkb)
+    aoi_union_feature.SetGeometry(geom)
+    shore_point_aoi_union_layer.CreateFeature(aoi_union_feature)
+
+    shore_point_aoi_union_vector = None
+    shore_point_aoi_union_layer = None
+    aoi_union_feature = None
+    geom = None
 
 
 def sample_line_to_points(
@@ -1895,16 +1951,43 @@ def merge_masks_op(mask_a, mask_b, nodata_a, nodata_b, target_nodata):
     return result
 
 
+def read_gpkg_to_shapely_polygon(gpkg_path):
+    driver = ogr.GetDriverByName("GPKG")
+    ds = driver.Open(gpkg_path, 0)
+    layer = ds.GetLayer()
+    feature = next(iter(layer))
+    geom = feature.GetGeometryRef()
+    wkt = geom.ExportToWkt()
+    shapely_polygon = shapely.wkt.loads(wkt)
+    return shapely_polygon
+
+
+def save_shapely_to_file(shapely_poly, srs, target_path):
+    driver = ogr.GetDriverByName("GPKG")
+    target_vector = driver.CreateDataSource(target_path)
+    target_layer = target_vector.CreateLayer(
+        '', geom_type=ogr.wkbPolygon, srs=srs)
+    target_feature = ogr.Feature(target_layer.GetLayerDefn())
+    geom = ogr.CreateGeometryFromWkb(shapely_poly.wkb)
+    target_feature.SetGeometry(geom)
+    target_layer.CreateFeature(target_feature)
+
+    target_vector = None
+    target_layer = None
+    target_feature = None
+    geom = None
+
+
 def merge_cv_points_and_add_risk(
         cv_vector_queue, expected_payload_count, habitat_fieldname_list,
-        target_cv_vector_path):
+        target_cv_vector_shore_coverage_path):
     """Merge vectors in `cv_vector_queue` into single vector.
 
     Parameters:
         cv_vector_queue (multiprocessing.Processing): a queue containing
             paths to CV workspace point vectors. Terminated with
             `STOP_SENTINEL`.
-        target_cv_vector_path (str): path to a point vector created by this
+        target_cv_vector_shore_coverage_path (str): path to a point vector created by this
             function.
 
     Returns:
@@ -1912,33 +1995,101 @@ def merge_cv_points_and_add_risk(
 
     """
     try:
-        if os.path.exists(target_cv_vector_path):
-            os.remove(target_cv_vector_path)
+        if os.path.exists(target_cv_vector_shore_coverage_path):
+            os.remove(target_cv_vector_shore_coverage_path)
         payload_count = 0
-        start_time = time.time()
         result = None
+        cv_vector_shore_coverage_path_list = []
+        cv_vector_shore_aoi_path_list = []
+        cv_vector_shore_aoi_preped_list = []
+        # gather all the results
         while True:
-            cv_vector_path = cv_vector_queue.get()
+            payload = cv_vector_queue.get()
             payload_count += 1
-            if cv_vector_path == STOP_SENTINEL:
+            if payload == STOP_SENTINEL:
                 break
+            cv_vector_shore_coverage_path, cv_vector_shore_aoi_path = (
+                payload)
+            cv_vector_shore_coverage_vector = ogr.Open(
+                cv_vector_shore_coverage_path, 0)
+            cv_vector_shore_coverage_layer = \
+                cv_vector_shore_coverage_vector.GetLayer()
+            feature_count = cv_vector_shore_coverage_layer.GetFeatureCount()
+            cv_vector_shore_coverage_vector = None
+            cv_vector_shore_coverage_layer = None
+            if feature_count == 0:
+                continue
+            cv_vector_shore_coverage_path_list.append(
+                cv_vector_shore_coverage_path)
+            cv_vector_shore_aoi_path_list.append(cv_vector_shore_aoi_path)
+            cv_vector_shore_aoi = read_gpkg_to_shapely_polygon(
+                cv_vector_shore_aoi_path)
+            cv_vector_shore_aoi_preped_list.append(
+                shapely.prepared.prep(cv_vector_shore_aoi))
+
             add_cv_vector_risk(
-                habitat_fieldname_list, cv_vector_path)
-            if not os.path.exists(target_cv_vector_path):
-                shutil.copy(cv_vector_path, target_cv_vector_path)
-                cmd = f'ogr2ogr -f "GPKG" -t_srs EPSG:4326 {target_cv_vector_path} {cv_vector_path}'
-            else:
-                cmd = f'ogr2ogr -f "GPKG" -t_srs EPSG:4326 -update -append {target_cv_vector_path} {cv_vector_path}'
-            if result is not None:
-                result.wait()
+                habitat_fieldname_list, cv_vector_shore_coverage_path)
+
+        # process all the results and clip so shore point regions don't overlap
+        start_time = time.time()
+        payload_count = 0
+        epsg4326_srs = osr.SpatialReference()
+        epsg4326_srs.ImportFromEPSG(4326)
+        for (cv_vector_shore_coverage_path,
+             cv_vector_shore_aoi_path,
+             cv_vector_shore_aoi_preped) in zip(
+                cv_vector_shore_coverage_path_list,
+                cv_vector_shore_aoi_path_list,
+                cv_vector_shore_aoi_preped_list):
+
+            # the separate wedges of risk: cv_vector_shore_coverage_path
+            # the aoi polygon convering the wedges: cv_vector_shore_aoi_path
+
+            cv_vector_shore_aoi = read_gpkg_to_shapely_polygon(
+                cv_vector_shore_aoi_path)
+
+            for test_cv_vector_shore_aoi_path, test_cv_vector_shore_aoi_preped in zip(
+                    cv_vector_shore_aoi_path_list,
+                    cv_vector_shore_aoi_preped_list):
+                if test_cv_vector_shore_aoi_path == cv_vector_shore_aoi_path:
+                    # skip if it's the same
+                    continue
+                if test_cv_vector_shore_aoi_preped.intersects(
+                        cv_vector_shore_aoi):
+                    test_cv_vector_shore_aoi = read_gpkg_to_shapely_polygon(
+                        test_cv_vector_shore_aoi_path)
+                    cv_vector_shore_aoi = cv_vector_shore_aoi.difference(
+                        test_cv_vector_shore_aoi)
+            # cv_vector_shore_aoi should be resaved to disk
+            save_shapely_to_file(
+                cv_vector_shore_aoi, epsg4326_srs, cv_vector_shore_aoi_path)
+
+            cv_vector_clipped_shore_coverage_path = os.path.join(
+                os.path.dirname(cv_vector_shore_coverage_path),
+                'clipped_shore_aoi.gpkg')
+            cmd = f'ogr2ogr -clipsrc {cv_vector_shore_aoi_path} {cv_vector_clipped_shore_coverage_path} {cv_vector_shore_coverage_path}'
+            LOGGER.debug(f'******* running {cmd}')
             result = subprocess.Popen(cmd, shell=True)
+            result.wait()
+
+            if not os.path.exists(target_cv_vector_shore_coverage_path):
+                shutil.copy(
+                    cv_vector_clipped_shore_coverage_path,
+                    target_cv_vector_shore_coverage_path)
+            else:
+                cmd = (
+                    f'ogr2ogr -f "GPKG" -t_srs EPSG:4326 -update -append '
+                    f'{target_cv_vector_shore_coverage_path} '
+                    f'{cv_vector_clipped_shore_coverage_path}')
+                result = subprocess.Popen(cmd, shell=True)
+                result.wait()
             LOGGER.info(result)
             expected_runtime = (expected_payload_count-payload_count) * (
                 time.time()-start_time)/payload_count
+            payload_count += 1
             LOGGER.info(
                 f'merge cv points {payload_count/expected_payload_count*100:.2f}% complete, '
                 f'expect {expected_runtime:.2f}s to complete')
-        result.wait()
     except Exception:
         LOGGER.exception('error in merge_cv_points_and_add_risk')
     finally:
@@ -1974,16 +2125,15 @@ def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
         cv_risk_vector = gdal.OpenEx(
             cv_risk_vector_path, gdal.OF_VECTOR | gdal.GA_Update)
         cv_risk_layer = cv_risk_vector.GetLayer()
+        if cv_risk_layer.GetFeatureCount() == 0:
+            return
 
         for base_field, risk_field in [
                 ('surge', 'Rsurge'), ('ew', 'Rwave'), ('rei', 'Rwind'),
                 ('slr', 'Rslr'), ('relief', 'Rrelief')]:
             LOGGER.info(f'set risk field for {base_field} {risk_field}')
             cv_risk_layer.CreateField(ogr.FieldDefn(risk_field, ogr.OFTReal))
-            n_features = cv_risk_layer.GetFeatureCount()
-            if n_features == 0:
-                continue
-            base_array = numpy.empty(shape=(n_features,))
+            base_array = numpy.empty(shape=(cv_risk_layer.GetFeatureCount(),))
             for index, feature in enumerate(cv_risk_layer):
                 base_array[index] = feature.GetField(base_field)
             nan_mask = numpy.isnan(base_array)
@@ -2204,12 +2354,10 @@ def calculate_habitat_value(
         if key == NOHAB_ID:
             # already processed above
             continue
-        process_hab_temp_workdir = os.path.join(temp_workspace_dir, str(key))
-        os.makedirs(process_hab_temp_workdir, exist_ok=True)
         process_hab_task = task_graph.add_task(
             func=_process_hab,
             args=(
-                shore_sample_point_vector_path, key, process_hab_temp_workdir,
+                shore_sample_point_vector_path, key, temp_workspace_dir,
                 hab_raster_path_list, target_pixel_size,
                 nohab_raster_path, results_dir),
             store_result=True)
@@ -2233,7 +2381,6 @@ def _process_hab(
         nohab_raster_path, results_dir):
 
     gpkg_driver = ogr.GetDriverByName('gpkg')
-    LOGGER.debug(f'********* processing hab on {shore_sample_point_vector_path}')
     shore_sample_point_vector = gdal.OpenEx(
         shore_sample_point_vector_path, gdal.OF_VECTOR)
     shore_sample_point_layer = shore_sample_point_vector.GetLayer()
@@ -2288,7 +2435,7 @@ def _process_hab(
 
     shore_sample_point_layer.ResetReading()
     buffer_habitat_layer.StartTransaction()
-    for point_index, point_feature in enumerate(shore_sample_point_layer):
+    for point_index, shore_wedge_feature in enumerate(shore_sample_point_layer):
         if point_index % 1000 == 0:
             LOGGER.debug(
                 'point buffering is %.2f%% complete',
@@ -2296,7 +2443,7 @@ def _process_hab(
                 100.0)
         # for each point, convert to local UTM to buffer out a given
         # distance then back to wgs84
-        point_geom = point_feature.GetGeometryRef()
+        point_geom = shore_wedge_feature.GetGeometryRef().Centroid()
         x_val = point_geom.GetX()
         if (x_val < -179.8) or (x_val > 179.8):
             continue
@@ -2313,14 +2460,14 @@ def _process_hab(
         buffer_point_feature = ogr.Feature(buffer_habitat_layer_defn)
         buffer_point_feature.SetGeometry(buffer_poly_geom)
 
-        LOGGER.debug(f'******** aobut to query {habitat_service_id} on point {point_index} of {shore_sample_point_vector_path}')
-        point_hab_service_val = point_feature.GetField(habitat_service_id)
+        point_hab_service_val = shore_wedge_feature.GetField(
+            habitat_service_id)
         if point_hab_service_val > 0:
             buffer_point_feature.SetField(
                 habitat_service_id, point_hab_service_val)
             buffer_habitat_layer.CreateFeature(buffer_point_feature)
         buffer_point_feature = None
-        point_feature = None
+        shore_wedge_feature = None
         buffer_poly_geom = None
         point_geom = None
 
@@ -2430,8 +2577,7 @@ def align_raster_list(raster_path_list, target_directory):
         for path in raster_path_list]
     target_pixel_size = geoprocessing.get_raster_info(
         raster_path_list[0])['pixel_size']
-    LOGGER.debug(
-        f'about to align: {raster_path_list} in directory {target_directory}')
+    LOGGER.debug('about to align: %s', str(raster_path_list))
     task_graph.add_task(
         func=geoprocessing.align_and_resize_raster_stack,
         args=(
@@ -2439,9 +2585,7 @@ def align_raster_list(raster_path_list, target_directory):
             ['near'] * len(raster_path_list), target_pixel_size,
             'intersection'),
         target_path_list=aligned_path_list,
-        task_name=(
-            f'align raster list for {raster_path_list} to '
-            f'{aligned_path_list}'))
+        task_name=f'align raster list for {raster_path_list}')
     return aligned_path_list
 
 
@@ -2568,7 +2712,6 @@ def calculate_degree_cell_cv(
             lulc_raster_info['projection_wkt'],
             osr.SRS_WKT_WGS84_LAT_LONG)
         lulc_bb_box = shapely.geometry.box(*lulc_wgs84_bb)
-        # TODO: clip all the inputs
         clipped_dir = os.path.join(local_workspace_dir, 'clipped')
         os.makedirs(clipped_dir, exist_ok=True)
         worker_list = []
@@ -2611,9 +2754,6 @@ def calculate_degree_cell_cv(
 
     n_boxes = 0
     for index, shore_grid_feature in enumerate(shore_grid_layer):
-        if 'shore_grid_fid' in local_data_path_map:
-            if shore_grid_feature.GetFID() != int(local_data_path_map['shore_grid_fid']):
-                continue
         shore_grid_geom = shore_grid_feature.GetGeometryRef()
         boundary_box = shapely.wkb.loads(
             bytes(shore_grid_geom.ExportToWkb()))
@@ -2622,7 +2762,8 @@ def calculate_degree_cell_cv(
             continue
         bb_work_queue.put((index, boundary_box.bounds))
         n_boxes += 1
-        break
+        if n_boxes > 2:
+            break
 
     for worker_id in range(min(MAX_WORKERS, n_boxes+1, int(multiprocessing.cpu_count()))):
         cv_grid_worker_thread = multiprocessing.Process(
@@ -2654,12 +2795,14 @@ def calculate_degree_cell_cv(
         # first element is the hab id
         habitat_fieldname_list.append(key[0])
 
+    LOGGER.info(f'********* starting merge_cv_points_and_add_risk {target_cv_vector_path}')
     merge_cv_points_and_add_risk_thread = threading.Thread(
         target=merge_cv_points_and_add_risk,
         args=(cv_point_complete_queue, n_boxes,
               list(set(habitat_fieldname_list)),
               target_cv_vector_path))
     merge_cv_points_and_add_risk_thread.start()
+    LOGGER.info(f'********* done with  merge_cv_points_and_add_risk {target_cv_vector_path}')
 
     for cv_grid_worker_thread in cv_grid_worker_list:
         cv_grid_worker_thread.join()
@@ -2670,7 +2813,7 @@ def calculate_degree_cell_cv(
 
     LOGGER.debug('calculate cv vector risk')
     add_cv_vector_risk(
-     list(set(habitat_fieldname_list)), target_cv_vector_path)
+        list(set(habitat_fieldname_list)), target_cv_vector_path)
 
 
 def _process_scenario_ini(scenario_config_path):
@@ -2759,16 +2902,11 @@ def main():
     LOGGER.debug('starting')
     parser = argparse.ArgumentParser(description='Global CV analysis')
     parser.add_argument(
-        'scenario_config_path', nargs='+',
+        'scenario_config_path',
         help='Pattern to .INI file(s) that describes scenario(s) to run.')
-    parser.add_argument(
-        '--calc_hab_value_rasters', action='store_true',
-        help='pass if you want to do hab raster calc')
     args = parser.parse_args()
 
-    scenario_config_path_list = [
-        path for pattern in args.scenario_config_path
-        for path in glob.glob(pattern)]
+    scenario_config_path_list = list(glob.glob(args.scenario_config_path))
     LOGGER.info(f'''parsing and validating {
         len(scenario_config_path_list)} configuration files''')
     config_scenario_list = []
@@ -2777,10 +2915,12 @@ def main():
             scenario_config_path)
         config_scenario_list.append((scenario_config, scenario_id))
 
+    task_graph_list = []
     for scenario_config, scenario_id in config_scenario_list:
         workspace_dir = scenario_config['workspace_dir']
-        os.makedirs(workspace_dir, exist_ok=True)
         task_graph = taskgraph.TaskGraph(workspace_dir, -1)
+        task_graph_list.append(task_graph)
+        os.makedirs(workspace_dir, exist_ok=True)
         local_workspace_dir = os.path.join(workspace_dir, scenario_id)
         local_habitat_value_dir = os.path.join(
             workspace_dir, scenario_id, 'value_rasters')
@@ -2800,13 +2940,14 @@ def main():
         calculate_cv_vector_task.join()
 
         LOGGER.info('starting hab value calc')
-        if args.calc_hab_value_rasters:
-            calculate_habitat_value(
-                target_cv_vector_path, scenario_config,
-                local_habitat_value_dir)
+        calculate_habitat_value(
+            target_cv_vector_path, scenario_config,
+            local_habitat_value_dir)
 
-    task_graph.join()
-    task_graph.close()
+    for task_graph in task_graph_list:
+        task_graph.join()
+        task_graph.close()
+
     LOGGER.info('completed successfully')
 
 
