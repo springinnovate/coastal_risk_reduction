@@ -2754,6 +2754,11 @@ def calculate_degree_cell_cv(
 
     n_boxes = 0
     for index, shore_grid_feature in enumerate(shore_grid_layer):
+        if 'shore_grid_fid' in local_data_path_map:
+            # hard coded field to debug just a particular grid square, put here
+            #
+            if shore_grid_feature.GetFID() != int(local_data_path_map['shore_grid_fid']):
+                continue
         shore_grid_geom = shore_grid_feature.GetGeometryRef()
         boundary_box = shapely.wkb.loads(
             bytes(shore_grid_geom.ExportToWkb()))
