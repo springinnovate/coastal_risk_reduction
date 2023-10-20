@@ -2587,6 +2587,7 @@ def align_raster_list(raster_path_list, target_directory):
             'intersection'),
         target_path_list=aligned_path_list,
         task_name=f'align raster list for {raster_path_list}')
+    task_graph.join()
     return aligned_path_list
 
 
