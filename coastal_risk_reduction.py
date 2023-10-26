@@ -371,16 +371,8 @@ def cv_grid_worker(
                     float(local_data_path_map['max_fetch_distance']),
                     'Rgeomorphology')
 
-                shore_aoi_region_vector_path = os.path.join(
-                    workspace_dir, 'coast_aoi_regions.gpkg')
-                voroni_polygons_from_points(
-                    shore_point_vector_path,
-                    shore_point_sample_distance,
-                    max_sample_distance,
-                    shore_aoi_region_vector_path)
-
-                LOGGER.info('completed %s', shore_aoi_region_vector_path)
-                cv_point_complete_queue.put(shore_aoi_region_vector_path)
+                LOGGER.info('completed %s', shore_point_vector_path)
+                cv_point_complete_queue.put(shore_point_vector_path)
 
             except Exception:
                 LOGGER.warning(
@@ -1039,15 +1031,17 @@ def calculate_rhab(
         else:
             continue
         if shore_point_defn.GetFieldIndex(hab_id) == -1:
-            relief_field = ogr.FieldDefn(str(hab_id), ogr.OFTReal)
-            relief_field.SetPrecision(5)
-            relief_field.SetWidth(24)
-            shore_point_layer.CreateField(relief_field)
+            hab_r_field = ogr.FieldDefn(str(hab_id), ogr.OFTReal)
+            hab_r_field.SetPrecision(5)
+            hab_r_field.SetWidth(24)
+            shore_point_layer.CreateField(hab_r_field)
+    hab_r_field = ogr.FieldDefn(str('Rhab'), ogr.OFTReal)
+    hab_r_field.SetPrecision(5)
+    hab_r_field.SetWidth(24)
+    shore_point_layer.CreateField(hab_r_field)
     shore_point_layer.CommitTransaction()
 
     shore_point_info = geoprocessing.get_vector_info(shore_point_vector_path)
-
-    shore_point_feature_risk_map = collections.defaultdict(list)
 
     tmp_working_dir = tempfile.mkdtemp(
         prefix='calculate_rhab_',
@@ -1127,6 +1121,7 @@ def calculate_rhab(
     for shore_feature in shore_point_layer:
         fid = shore_feature.GetFID()
         hab_risk_dict = hab_id_feature_risk_map[fid]
+        shore_point_feature_risk_list = []
         for hab_id, hab_risk_val in hab_to_risk_map.items():
             pixel_val = hab_risk_dict[hab_id]
             local_risk_val = 5-(5-hab_risk_val)*numpy.minimum(1, numpy.sin(
@@ -1134,17 +1129,22 @@ def calculate_rhab(
                     numpy.pi/2, pixel_val*numpy.pi/2/max_risk_threshold)))
             if hab_id == 'forest_mangroves':
                 LOGGER.debug(f'{max_risk_threshold} {local_risk_val} {pixel_val}')
-            shore_point_feature_risk_map[shore_feature.GetFID()].append(
-                local_risk_val)
+            shore_point_feature_risk_list.append(local_risk_val)
             shore_feature.SetField(hab_id, local_risk_val)
+        # TODO: combine all the hab risk into an overall Rhab
+        r_hab = numpy.maximum(
+            numpy.min(shore_point_feature_risk_list), 5-4*numpy.linalg.norm(
+                1-((numpy.array(shore_point_feature_risk_list)-1)/4), axis=0))
+        shore_feature.SetField('Rhab', r_hab)
         shore_point_layer.SetFeature(shore_feature)
+
     shore_point_layer.CommitTransaction()
 
     shore_point_layer = None
     shore_point_vector = None
     hab_effective_raster = None
     hab_effective_band = None
-    #retrying_rmtree(tmp_working_dir)
+    retrying_rmtree(tmp_working_dir)
 
 
 @retrying.retry(
@@ -1968,8 +1968,9 @@ def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
             nan_mask = numpy.isnan(base_array)
             max_val = numpy.max(base_array[~nan_mask])
             base_array[nan_mask] = max_val
+            n_bins = 100
             try:
-                hist, bin_edges = numpy.histogram(base_array, bins=5)
+                hist, bin_edges = numpy.histogram(base_array, bins=n_bins)
             except IndexError:
                 LOGGER.warning(f'possible nodata error on histogram for {base_field}/{risk_field} on {cv_risk_vector_path}: {base_array}')
                 bin_edges = [0]*5
@@ -1983,23 +1984,16 @@ def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
                         f'{index/n_features*100:.2f}% complete for {risk_field} '
                         f'{index+1}/{n_features}')
                 base_val = feature.GetField(base_field)
-                risk = bisect.bisect_left(bin_edges, base_val)
-                if risk < 1:
-                    risk = 1
-                elif risk > 5:
-                    risk = 5
+                risk = 1+4*bisect.bisect_left(bin_edges, base_val)/n_bins
                 feature.SetField(risk_field, risk)
                 cv_risk_layer.SetFeature(feature)
             cv_risk_layer.CommitTransaction()
         cv_risk_layer.ResetReading()
 
-        cv_risk_layer.CreateField(ogr.FieldDefn('Rt', ogr.OFTReal))
-        for hab_field in habitat_fieldname_list:
-            cv_risk_layer.CreateField(
-                ogr.FieldDefn('Rhab_%s' % hab_field, ogr.OFTReal))
-            cv_risk_layer.CreateField(
-                ogr.FieldDefn('Rt_habservice_%s' % hab_field, ogr.OFTReal))
-        cv_risk_layer.CreateField(ogr.FieldDefn('Rhab_all', ogr.OFTReal))
+        cv_risk_layer.CreateField(
+            ogr.FieldDefn('Rt', ogr.OFTReal))
+        cv_risk_layer.CreateField(
+            ogr.FieldDefn('Rt_hab_service_index', ogr.OFTReal))
 
         cv_risk_layer.ResetReading()
         cv_risk_layer.StartTransaction()
@@ -2009,42 +2003,24 @@ def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
                 LOGGER.info(
                     f'{index/n_features*100:.2f}% complete for {risk_field} '
                     f'{index+1}/{n_features}')
-            hab_val_map = {}
-            for hab_field in habitat_fieldname_list:
-                hab_val = feature.GetField(hab_field)
-                feature.SetField('Rhab_%s' % hab_field, hab_val)
-                hab_val_map[hab_field] = hab_val
 
-                # loop through every hab field but hab_field to calc Rhab_no
-                risk_diff_list = []  # for (5-rk) vals
-                for sub_hab_field in habitat_fieldname_list:
-                    if sub_hab_field != hab_field:
-                        risk_diff_list.append(5-feature.GetField(sub_hab_field))
-
-            # Rhab
-            # loop through every hab field but hab_field to calc Rhab_no
-            risk_diff_list = []  # for (5-rk) vals
-            for sub_hab_field in habitat_fieldname_list:
-                risk_diff_list.append(5-feature.GetField(sub_hab_field))
-
-            # TODO: change this to combine with the overlaps and stuff
-
-            # Rt
             exposure_index = 1.0
             for risk_field in [
-                    'Rgeomorphology', 'Rhab_all', 'Rsurge', 'Rwave', 'Rwind',
+                    'Rgeomorphology', 'Rhab', 'Rsurge', 'Rwave', 'Rwind',
                     'Rslr', 'Rrelief']:
                 exposure_index *= feature.GetField(risk_field)
             exposure_index = (exposure_index)**(1./7.)
             feature.SetField('Rt', exposure_index)
 
-            for hab_field in habitat_fieldname_list:
-                # TODO: fix the service here
-                hab_service = (9999 - feature.GetField('Rt'))
-                if numpy.isclose(hab_service, 0.0):
-                    hab_service = 0.0
-                feature.SetField('Rt_habservice_%s' % hab_field, hab_service)
-
+            # calc the service
+            nohab_exposure_index = 1
+            for risk_field in [
+                    'Rgeomorphology', 'Rsurge', 'Rwave', 'Rwind',
+                    'Rslr', 'Rrelief']:
+                nohab_exposure_index *= feature.GetField(risk_field)
+            nohab_exposure_index = (nohab_exposure_index)**(1./6.)
+            feature.SetField(
+                'Rt_hab_service_index', nohab_exposure_index-exposure_index)
             cv_risk_layer.SetFeature(feature)
         cv_risk_layer.CommitTransaction()
         cv_risk_layer = None
