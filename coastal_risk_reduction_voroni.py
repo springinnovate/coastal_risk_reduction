@@ -2519,6 +2519,7 @@ def _process_hab(
         aligned_value_hab_raster_path_list = align_raster_list(
             [value_coverage_raster_path, local_hab_raster_path,
              nohab_raster_path], temp_workspace_dir)
+        LOGGER.debug(f'*********** {aligned_value_hab_raster_path_list}')
 
         geoprocessing.raster_calculator(
             [(aligned_value_hab_raster_path_list[0], 1),
@@ -2586,6 +2587,7 @@ def align_raster_list(raster_path_list, target_directory):
             'intersection'),
         target_path_list=aligned_path_list,
         task_name=f'align raster list for {raster_path_list}')
+    task_graph.join()
     return aligned_path_list
 
 
@@ -2754,6 +2756,11 @@ def calculate_degree_cell_cv(
 
     n_boxes = 0
     for index, shore_grid_feature in enumerate(shore_grid_layer):
+        if 'shore_grid_fid' in local_data_path_map:
+            # hard coded field to debug just a particular grid square, put here
+            #
+            if shore_grid_feature.GetFID() != int(local_data_path_map['shore_grid_fid']):
+                continue
         shore_grid_geom = shore_grid_feature.GetGeometryRef()
         boundary_box = shapely.wkb.loads(
             bytes(shore_grid_geom.ExportToWkb()))
