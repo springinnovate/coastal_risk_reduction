@@ -1953,12 +1953,15 @@ def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
         cv_risk_vector = gdal.OpenEx(
             cv_risk_vector_path, gdal.OF_VECTOR | gdal.GA_Update)
         cv_risk_layer = cv_risk_vector.GetLayer()
+        cv_risk_layer_defn = cv_risk_layer.GetLayerDefn()
 
         for base_field, risk_field in [
                 ('surge', 'Rsurge'), ('ew', 'Rwave'), ('rei', 'Rwind'),
                 ('slr', 'Rslr'), ('relief', 'Rrelief')]:
             LOGGER.info(f'set risk field for {base_field} {risk_field}')
-            cv_risk_layer.CreateField(ogr.FieldDefn(risk_field, ogr.OFTReal))
+            if cv_risk_layer_defn.GetFieldIndex(risk_field) == -1:
+                cv_risk_layer.CreateField(ogr.FieldDefn(
+                    risk_field, ogr.OFTReal))
             n_features = cv_risk_layer.GetFeatureCount()
             if n_features == 0:
                 continue
@@ -2018,7 +2021,7 @@ def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
                     'Rgeomorphology', 'Rsurge', 'Rwave', 'Rwind',
                     'Rslr', 'Rrelief']:
                 nohab_exposure_index *= feature.GetField(risk_field)
-            nohab_exposure_index = (nohab_exposure_index)**(1./6.)
+            nohab_exposure_index = (5*nohab_exposure_index)**(1./7.)
             feature.SetField(
                 'Rt_hab_service_index', nohab_exposure_index-exposure_index)
             cv_risk_layer.SetFeature(feature)
