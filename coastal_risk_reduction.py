@@ -210,6 +210,8 @@ def cv_grid_worker(
         landmass_strtree, landmass_object_list = landmass_strtree_thread.join()
         LOGGER.debug('waiting for wwiii_strtree to finish')
         wwiii_strtree, wwiii_object_list = wwiii_strtree_thread.join()
+        LOGGER.debug(f'******** this is the object list: {wwiii_object_list}')
+        return
         LOGGER.debug('done with all three spatial indexes being built')
 
         geomorphology_proj_wkt = geoprocessing.get_vector_info(
@@ -725,8 +727,9 @@ def calculate_wind_and_wave(
         _ = shore_point_geom.Transform(base_to_target_transform)
         shore_point_shapely = shapely.wkb.loads(
             bytes(shore_point_geom.ExportToWkb()))
-        wwiii_index = wwiii_strtree.query_nearest(
-            shore_point_shapely, all_matches=False)[0]
+        LOGGER.debug(f'***************** {wwiii_strtree})')
+        wwiii_index = next(iter(wwiii_strtree.query_nearest(
+            shore_point_shapely, all_matches=False)))
         wwiii_point = wwiii_object_list[wwiii_index].field_val_map
 
         rei_value = 0.0
@@ -2566,7 +2569,7 @@ def calculate_degree_cell_cv(
             lulc_raster_info['projection_wkt'],
             osr.SRS_WKT_WGS84_LAT_LONG)
         lulc_bb_box = shapely.geometry.box(*lulc_wgs84_bb)
-        # TODO: clip all the inputs
+        # clip all the inputs to the lulc bounding box
         clipped_dir = os.path.join(local_workspace_dir, 'clipped')
         os.makedirs(clipped_dir, exist_ok=True)
         worker_list = []
@@ -2665,7 +2668,7 @@ def calculate_degree_cell_cv(
 
     LOGGER.debug('calculate cv vector risk')
     add_cv_vector_risk(
-     list(set(habitat_fieldname_list)), target_cv_vector_path)
+        list(set(habitat_fieldname_list)), target_cv_vector_path)
 
 
 def _process_scenario_ini(scenario_config_path):
