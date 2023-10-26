@@ -287,7 +287,7 @@ def cv_grid_worker(
 
                 local_geomorphology_vector_path = os.path.join(
                     workspace_dir, 'geomorphology.gpkg')
-                LOGGER.debug(f'clip geomorphology for {payload}')
+                LOGGER.debug(f'git geomorphology for {payload}')
                 clip_geometry(
                     bounding_box_list, wgs84_srs, utm_srs,
                     ogr.wkbMultiLineString, geomorphology_strtree,
