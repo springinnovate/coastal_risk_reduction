@@ -2480,7 +2480,6 @@ def calculate_degree_cell_cv(
             continue
         bb_work_queue.put((index, boundary_box.bounds))
         n_boxes += 1
-        break
 
     for worker_id in range(min(MAX_WORKERS, n_boxes+1, int(multiprocessing.cpu_count()))):
         cv_grid_worker_thread = multiprocessing.Process(
