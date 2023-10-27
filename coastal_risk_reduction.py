@@ -1025,20 +1025,22 @@ def calculate_rhab(
     shore_point_layer.StartTransaction()
     shore_point_defn = shore_point_layer.GetLayerDefn()
 
+    hab_id_list = []
+
     for payload in habitat_raster_path_map:
         if isinstance(payload, tuple):
-            hab_id = payload[0]
+            hab_id_list.append(payload[0])
         else:
             continue
+    hab_knockout_pattern = 'Rhab_no_{hab_id}'
+    hab_knockout_id_list = [
+        hab_knockout_pattern.format(hab_id=hab_id) for hab_id in hab_id_list]
+    for hab_id in hab_id_list + hab_knockout_id_list + ['Rhab']:
         if shore_point_defn.GetFieldIndex(hab_id) == -1:
             hab_r_field = ogr.FieldDefn(str(hab_id), ogr.OFTReal)
             hab_r_field.SetPrecision(5)
             hab_r_field.SetWidth(24)
             shore_point_layer.CreateField(hab_r_field)
-    hab_r_field = ogr.FieldDefn(str('Rhab'), ogr.OFTReal)
-    hab_r_field.SetPrecision(5)
-    hab_r_field.SetWidth(24)
-    shore_point_layer.CreateField(hab_r_field)
     shore_point_layer.CommitTransaction()
 
     shore_point_info = geoprocessing.get_vector_info(shore_point_vector_path)
@@ -1056,7 +1058,8 @@ def calculate_rhab(
         if isinstance(payload, tuple):
             (hab_id, risk_val, eff_dist) = payload
         else:
-            raise ValueError(f'unknown input "{hab_id}": "{payload}"')
+            raise ValueError(f'unknown input "{payload}"')
+
         local_hab_raster_path = os.path.join(
             tmp_working_dir, f'{hab_id}.tif')
         local_clip_stack = []
@@ -1114,27 +1117,37 @@ def calculate_rhab(
             hab_to_risk_map[hab_id] = risk_val
             hab_id_feature_risk_map[shore_feature.GetFID()][hab_id] += pixel_val
 
+    min_risk_value = numpy.min(list(hab_to_risk_map.values()))
+
     # set all the features now that the hab values have been collected
     max_risk_threshold = 1-(1/2)**0.5
-    shore_point_layer.ResetReading()
     shore_point_layer.StartTransaction()
     for shore_feature in shore_point_layer:
         fid = shore_feature.GetFID()
         hab_risk_dict = hab_id_feature_risk_map[fid]
-        shore_point_feature_risk_list = []
+        shore_point_feature_risk_map = {}
         for hab_id, hab_risk_val in hab_to_risk_map.items():
             pixel_val = hab_risk_dict[hab_id]
             local_risk_val = 5-(5-hab_risk_val)*numpy.minimum(1, numpy.sin(
                 numpy.minimum(
                     numpy.pi/2, pixel_val*numpy.pi/2/max_risk_threshold)))
-            if hab_id == 'forest_mangroves':
-                LOGGER.debug(f'{max_risk_threshold} {local_risk_val} {pixel_val}')
-            shore_point_feature_risk_list.append(local_risk_val)
+            shore_point_feature_risk_map[hab_id] = local_risk_val
             shore_feature.SetField(hab_id, local_risk_val)
         # TODO: combine all the hab risk into an overall Rhab
+        for hab_id in hab_id_list:
+            hab_knockout_id = hab_knockout_pattern.format(hab_id=hab_id)
+            remaining_hab_ids = list(set(hab_id_list)-set([hab_id]))
+            hab_risk_list = [
+                shore_point_feature_risk_map[h] for h in remaining_hab_ids]
+            r_hab = numpy.maximum(
+                min_risk_value, 5-4*numpy.linalg.norm(
+                    1-((numpy.array(hab_risk_list)-1)/4), axis=0))
+            shore_feature.SetField(hab_knockout_id, r_hab)
+        # Do once more for all habitat
+        hab_risk_list = list(shore_point_feature_risk_map.values())
         r_hab = numpy.maximum(
-            numpy.min(shore_point_feature_risk_list), 5-4*numpy.linalg.norm(
-                1-((numpy.array(shore_point_feature_risk_list)-1)/4), axis=0))
+            min_risk_value, 5-4*numpy.linalg.norm(
+                1-((numpy.array(hab_risk_list)-1)/4), axis=0))
         shore_feature.SetField('Rhab', r_hab)
         shore_point_layer.SetFeature(shore_feature)
 
@@ -1955,6 +1968,7 @@ def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
         cv_risk_layer = cv_risk_vector.GetLayer()
         cv_risk_layer_defn = cv_risk_layer.GetLayerDefn()
 
+        cv_risk_layer.StartTransaction()
         for base_field, risk_field in [
                 ('surge', 'Rsurge'), ('ew', 'Rwave'), ('rei', 'Rwind'),
                 ('slr', 'Rslr'), ('relief', 'Rrelief')]:
@@ -1979,7 +1993,6 @@ def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
                 bin_edges = [0]*5
 
             cv_risk_layer.ResetReading()
-            cv_risk_layer.StartTransaction()
             n_features = cv_risk_layer.GetFeatureCount()
             for index, feature in enumerate(cv_risk_layer):
                 if index % 1000 == 0:
@@ -1990,14 +2003,20 @@ def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
                 risk = 1+4*bisect.bisect_left(bin_edges, base_val)/n_bins
                 feature.SetField(risk_field, risk)
                 cv_risk_layer.SetFeature(feature)
-            cv_risk_layer.CommitTransaction()
         cv_risk_layer.ResetReading()
 
-        cv_risk_layer.CreateField(
-            ogr.FieldDefn('Rt', ogr.OFTReal))
-        cv_risk_layer.CreateField(
-            ogr.FieldDefn('Rt_hab_service_index', ogr.OFTReal))
+        for risk_id in ['Rt', 'Rt_hab_service_index'] + [f'Rt_hab_{hab_id}_service_index' for hab_id in habitat_fieldname_list]:
+            if cv_risk_layer_defn.GetFieldIndex(risk_id) == -1:
+                cv_risk_layer.CreateField(
+                    ogr.FieldDefn(risk_id, ogr.OFTReal))
 
+        for hab_id in habitat_fieldname_list:
+            rt_hab_service_field_id = f'Rt_hab_service_index_{hab_id}'
+            if cv_risk_layer_defn.GetFieldIndex(risk_id) == -1:
+                cv_risk_layer.CreateField(
+                    ogr.FieldDefn(rt_hab_service_field_id, ogr.OFTReal))
+
+        cv_risk_layer.CommitTransaction()
         cv_risk_layer.ResetReading()
         cv_risk_layer.StartTransaction()
         LOGGER.info('calcualte Rts for all points')
@@ -2012,18 +2031,26 @@ def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
                     'Rgeomorphology', 'Rhab', 'Rsurge', 'Rwave', 'Rwind',
                     'Rslr', 'Rrelief']:
                 exposure_index *= feature.GetField(risk_field)
-            exposure_index = (exposure_index)**(1./7.)
+            exposure_index = (exposure_index)**(1/7)
             feature.SetField('Rt', exposure_index)
 
-            # calc the service
+            # calc the hab service
             nohab_exposure_index = 1
             for risk_field in [
                     'Rgeomorphology', 'Rsurge', 'Rwave', 'Rwind',
                     'Rslr', 'Rrelief']:
                 nohab_exposure_index *= feature.GetField(risk_field)
-            nohab_exposure_index = (5*nohab_exposure_index)**(1./7.)
+            no_rhab_exposure_index = (5*nohab_exposure_index)**(1/7)
             feature.SetField(
-                'Rt_hab_service_index', nohab_exposure_index-exposure_index)
+                'Rt_hab_service_index', no_rhab_exposure_index)
+            for hab_id in habitat_fieldname_list:
+                knockout_hab_risk = feature.GetField(f'Rhab_no_{hab_id}')
+                hab_knockout_exposure_index = (
+                    knockout_hab_risk*nohab_exposure_index)**(1/7)
+                feature.SetField(
+                    f'Rt_hab_{hab_id}_service_index',
+                    hab_knockout_exposure_index-exposure_index)
+
             cv_risk_layer.SetFeature(feature)
         cv_risk_layer.CommitTransaction()
         cv_risk_layer = None
@@ -2092,173 +2119,123 @@ def calculate_habitat_value(
             risk_distance_lucode_map,
             scenario_config['lulc_raster_path'],
             risk_dist_raster_map, shore_point_info['bounding_box'],
-            osr.SRS_WKT_WGS84_LAT_LONG, target_pixel_size, results_dir),
+            osr.SRS_WKT_WGS84_LAT_LONG, target_pixel_size, temp_workspace_dir),
         store_result=True,
         task_name='clip and mask habitat layer').get()
 
     hab_value_raster_path_list = []
     task_list = []
-    for key, hab_raster_path_list in habitat_raster_path_map.items():
-        process_hab_temp_workdir = os.path.join(temp_workspace_dir, str(key))
+    for hab_id, hab_mask_raster_path_list in habitat_raster_path_map.items():
+        process_hab_temp_workdir = os.path.join(
+            temp_workspace_dir, str(hab_id))
         os.makedirs(process_hab_temp_workdir, exist_ok=True)
+        value_raster_path = os.path.join(
+            results_dir, f'{hab_id}_value.tif')
         process_hab_task = task_graph.add_task(
-            func=_process_hab,
+            func=_process_hab_value,
             args=(
-                shore_sample_point_vector_path, key, process_hab_temp_workdir,
-                hab_raster_path_list, target_pixel_size,
-                results_dir),
-            store_result=True)
+                shore_sample_point_vector_path, hab_id,
+                process_hab_temp_workdir, hab_mask_raster_path_list,
+                target_pixel_size, value_raster_path))
+        hab_value_raster_path_list.append(value_raster_path)
         task_list.append(process_hab_task)
 
     for task in task_list:
-        hab_value_raster_path_list.append(task.get())
+        task.join()
 
     total_value_sum_raster_path = os.path.join(
         results_dir, 'total_value_sum.tif')
     LOGGER.info('calculate final total hab value')
+    aligned_path_list = [
+        '%s_aligned%s' % os.path.splitext(path)
+        for path in hab_value_raster_path_list]
+    geoprocessing.align_and_resize_raster_stack(
+        hab_value_raster_path_list, aligned_path_list,
+        ['near']*len(aligned_path_list),
+        target_pixel_size, 'union')
+    target_nodata = geoprocessing.get_raster_info(
+        aligned_path_list[0])['nodata'][0]
+    def _add_value(*array_list):
+        result = numpy.zeros(array_list[0].shape)
+        valid_mask = numpy.zeros(array_list[0].shape, dtype=bool)
+        for array in array_list:
+            local_valid_mask = array != target_nodata
+            result[local_valid_mask] += array[local_valid_mask]
+            valid_mask |= local_valid_mask
+        return result
+
     geoprocessing.raster_calculator(
-        [(path, 1) for path in hab_value_raster_path_list],
-        _add_op, total_value_sum_raster_path, gdal.GDT_Float32,
+        [(path, 1) for path in aligned_path_list],
+        _add_value, total_value_sum_raster_path, gdal.GDT_Float32,
         _VALUE_COVER_NODATA)
+    retrying_rmtree(temp_workspace_dir)
 
 
-def _process_hab(
+def _process_hab_value(
         shore_sample_point_vector_path, key, temp_workspace_dir,
-        hab_raster_path_list, target_pixel_size, results_dir):
+        hab_mask_raster_path_list, target_pixel_size, value_raster_path):
 
-    gpkg_driver = ogr.GetDriverByName('gpkg')
     LOGGER.debug(f'********* processing hab on {shore_sample_point_vector_path}')
-    shore_sample_point_vector = gdal.OpenEx(
-        shore_sample_point_vector_path, gdal.OF_VECTOR)
-    shore_sample_point_layer = shore_sample_point_vector.GetLayer()
+    (hab_id, risk, protective_distance_m) = key
+    protective_distance_d = protective_distance_m / 111320  # approximate
+    habitat_service_id = f'Rt_hab_{hab_id}_service_index'
+
+    # TODO: locally clip and project everything
     shore_point_info = geoprocessing.get_vector_info(
         shore_sample_point_vector_path)
-
-    (hab_id, risk, protective_distance) = key
-    hab_suffix = f'{hab_id}_{risk}_{protective_distance}'
-    local_hab_raster_path = os.path.join(
-        temp_workspace_dir, f'{hab_suffix}.tif')
-
     local_clip_stack = []
-    for hab_raster_path in hab_raster_path_list:
+
+    for hab_raster_path in hab_mask_raster_path_list:
         basename = os.path.basename(os.path.splitext(hab_raster_path)[0])
         local_clip_raster_path = os.path.join(
             temp_workspace_dir, f'{basename}.tif')
         clip_and_reproject_raster(
             hab_raster_path, local_clip_raster_path,
             shore_point_info['projection_wkt'],
-            shore_point_info['bounding_box'], None, 'near', False,
-            target_pixel_size)
+            shore_point_info['bounding_box'], protective_distance_d,
+            'near', False, target_pixel_size)
         local_clip_stack.append(local_clip_raster_path)
+    local_hab_raster_path = os.path.join(
+        temp_workspace_dir, f'{hab_id}_merged_mask.tif')
     merge_mask_list(local_clip_stack, local_hab_raster_path)
 
-    habitat_service_id = 'Rt_habservice_%s' % hab_id
-    buffer_habitat_path = os.path.join(
-        temp_workspace_dir, '%s_buffer.gpkg' % hab_suffix)
-    if os.path.exists(buffer_habitat_path):
-        os.remove(buffer_habitat_path)
-    buffer_habitat_vector = gpkg_driver.CreateDataSource(
-        buffer_habitat_path)
-    wgs84_srs = osr.SpatialReference()
-    wgs84_srs.ImportFromEPSG(4326)
-    wgs84_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-    buffer_habitat_layer = (
-        buffer_habitat_vector.CreateLayer(
-            habitat_service_id, wgs84_srs, ogr.wkbPolygon))
-    buffer_habitat_layer.CreateField(ogr.FieldDefn(
-        habitat_service_id, ogr.OFTReal))
-    buffer_habitat_layer_defn = buffer_habitat_layer.GetLayerDefn()
-
-    shore_sample_point_layer.ResetReading()
-    buffer_habitat_layer.StartTransaction()
-    for point_index, point_feature in enumerate(shore_sample_point_layer):
-        if point_index % 1000 == 0:
-            LOGGER.debug(
-                'point buffering is %.2f%% complete',
-                point_index / shore_sample_point_layer.GetFeatureCount() *
-                100.0)
-        # for each point, convert to local UTM to buffer out a given
-        # distance then back to wgs84
-        point_geom = point_feature.GetGeometryRef()
-        x_val = point_geom.GetX()
-        if (x_val < -179.8) or (x_val > 179.8):
-            continue
-        utm_srs = calculate_utm_srs(point_geom.GetX(), point_geom.GetY())
-        utm_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-        wgs84_to_utm_transform = osr.CoordinateTransformation(
-            wgs84_srs, utm_srs)
-        utm_to_wgs84_transform = osr.CoordinateTransformation(
-            utm_srs, wgs84_srs)
-        point_geom.Transform(wgs84_to_utm_transform)
-        buffer_poly_geom = point_geom.Buffer(protective_distance)
-        buffer_poly_geom.Transform(utm_to_wgs84_transform)
-
-        buffer_point_feature = ogr.Feature(buffer_habitat_layer_defn)
-        buffer_point_feature.SetGeometry(buffer_poly_geom)
-
-        LOGGER.debug(f'******** aobut to query {habitat_service_id} on point {point_index} of {shore_sample_point_vector_path}')
-        point_hab_service_val = point_feature.GetField(habitat_service_id)
-        if point_hab_service_val > 0:
-            buffer_point_feature.SetField(
-                habitat_service_id, point_hab_service_val)
-            buffer_habitat_layer.CreateFeature(buffer_point_feature)
-        buffer_point_feature = None
-        point_feature = None
-        buffer_poly_geom = None
-        point_geom = None
-
-    # at this point every shore point has been buffered to the effective
-    # habitat distance and the habitat service has been saved with it
-    buffer_habitat_layer.CommitTransaction()
-    buffer_habitat_layer = None
-    buffer_habitat_vector = None
-    value_coverage_raster_path = os.path.join(
-        temp_workspace_dir, '%s_value_cover.tif' % hab_suffix)
-    LOGGER.info(f'create new value cover: {value_coverage_raster_path}')
+    # TODO: make the raster to rasterize on
+    hab_service_source_raster_path = os.path.join(
+        temp_workspace_dir, f'{hab_id}_value_cover.tif')
     geoprocessing.new_raster_from_base(
-        local_hab_raster_path, value_coverage_raster_path,
+        local_hab_raster_path, hab_service_source_raster_path,
         gdal.GDT_Float32, [_VALUE_COVER_NODATA],
         raster_driver_creation_tuple=(
             'GTIFF', (
                 'TILED=YES', 'BIGTIFF=YES', 'COMPRESS=LZW',
                 'BLOCKXSIZE=256', 'BLOCKYSIZE=256',)))
-    LOGGER.info(f'''rasterizing {buffer_habitat_path} onto {
-        value_coverage_raster_path} with attribute id {
-        habitat_service_id}''')
+
+    # TODO: rasterize shore_sample_point_vector_path's habitat_service_id
     geoprocessing.rasterize(
-        buffer_habitat_path, value_coverage_raster_path,
-        option_list=[
-            'ATTRIBUTE=%s' % habitat_service_id,
-            'MERGE_ALG=ADD'])
+        shore_sample_point_vector_path, hab_service_source_raster_path,
+        option_list=[f'ATTRIBUTE={habitat_service_id}'])
+    kernel_filepath = os.path.join(temp_workspace_dir, f'{key}_kernel.tif')
+    kernel_radius = [abs(protective_distance_d / x) for x in target_pixel_size]
+    create_averaging_kernel_raster(
+        kernel_radius, kernel_filepath, normalize=True)
+    hab_coverage_raster_path = os.path.join(
+        temp_workspace_dir, f'{key}_hab_coverage.tif')
 
-    habitat_value_raster_path = os.path.join(
-        results_dir, '%s_value.tif' % hab_suffix)
+    # TODO: convolve it
+    geoprocessing.convolve_2d(
+        (hab_service_source_raster_path, 1), (kernel_filepath, 1),
+        hab_coverage_raster_path, mask_nodata=False)
 
-    value_coverage_nodata = geoprocessing.get_raster_info(
-        value_coverage_raster_path)['nodata'][0]
-    hab_nodata = geoprocessing.get_raster_info(
-        local_hab_raster_path)['nodata'][0]
-
-    aligned_value_hab_raster_path_list = align_raster_list(
-        [value_coverage_raster_path, local_hab_raster_path],
-        temp_workspace_dir)
+    # TODO: mask the convolution to the corresponding habitat mask
+    target_nodata = -1
+    def mask_op(base_array, mask_array):
+        result = base_array.copy()
+        result[mask_array != 1] = target_nodata
+        return result
 
     geoprocessing.raster_calculator(
-        [(aligned_value_hab_raster_path_list[0], 1),
-         (aligned_value_hab_raster_path_list[1], 1),
-         (aligned_value_hab_raster_path_list[2], 1),
-         (value_coverage_nodata, 'raw'), (hab_nodata, 'raw')],
-        intersect_raster_op, habitat_value_raster_path,
-        gdal.GDT_Float32, value_coverage_nodata)
-
-    shore_sample_point_vector = None
-    shore_sample_point_layer = None
-
-    return habitat_value_raster_path
-
-
-def _add_op(*array_list):
-    return numpy.sum(array_list, axis=0)
+        [(hab_coverage_raster_path, 1), (local_hab_raster_path, 1)], mask_op,
+        value_raster_path, gdal.GDT_Float32, target_nodata)
 
 
 def intersect_raster_op(array_a, array_b, array_knockout, nodata_a, nodata_b):
