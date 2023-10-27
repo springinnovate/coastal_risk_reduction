@@ -2147,7 +2147,9 @@ def calculate_habitat_value(
         results_dir, 'total_value_sum.tif')
     LOGGER.info('calculate final total hab value')
     aligned_path_list = [
-        '%s_aligned%s' % os.path.splitext(path)
+        os.path.join(
+            temp_workspace_dir,
+            '%s_aligned%s' % os.path.splitext(os.path.basename(path)))
         for path in hab_value_raster_path_list]
     geoprocessing.align_and_resize_raster_stack(
         hab_value_raster_path_list, aligned_path_list,
@@ -2155,6 +2157,7 @@ def calculate_habitat_value(
         target_pixel_size, 'union')
     target_nodata = geoprocessing.get_raster_info(
         aligned_path_list[0])['nodata'][0]
+
     def _add_value(*array_list):
         result = numpy.zeros(array_list[0].shape)
         valid_mask = numpy.zeros(array_list[0].shape, dtype=bool)
