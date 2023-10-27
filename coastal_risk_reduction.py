@@ -2005,7 +2005,7 @@ def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
                 cv_risk_layer.SetFeature(feature)
         cv_risk_layer.ResetReading()
 
-        for risk_id in ['Rt', 'Rt_hab_service_index'] + [f'Rt_hab_{hab_id}_service_index' for hab_id in habitat_fieldname_list]:
+        for risk_id in ['Rt', 'Rt_nohab', 'Rt_hab_service_index'] + [f'Rt_hab_{hab_id}_service_index' for hab_id in habitat_fieldname_list]:
             if cv_risk_layer_defn.GetFieldIndex(risk_id) == -1:
                 cv_risk_layer.CreateField(
                     ogr.FieldDefn(risk_id, ogr.OFTReal))
@@ -2026,30 +2026,33 @@ def add_cv_vector_risk(habitat_fieldname_list, cv_risk_vector_path):
                     f'{index/n_features*100:.2f}% complete for {risk_field} '
                     f'{index+1}/{n_features}')
 
-            exposure_index = 1.0
+            rt = 1.0
             for risk_field in [
                     'Rgeomorphology', 'Rhab', 'Rsurge', 'Rwave', 'Rwind',
                     'Rslr', 'Rrelief']:
-                exposure_index *= feature.GetField(risk_field)
-            exposure_index = (exposure_index)**(1/7)
-            feature.SetField('Rt', exposure_index)
+                rt *= feature.GetField(risk_field)
+            rt = rt**(1/7)
+            feature.SetField('Rt', rt)
 
             # calc the hab service
-            nohab_exposure_index = 1
+            biophysical_exposure_index = 1
             for risk_field in [
                     'Rgeomorphology', 'Rsurge', 'Rwave', 'Rwind',
                     'Rslr', 'Rrelief']:
-                nohab_exposure_index *= feature.GetField(risk_field)
-            no_rhab_exposure_index = (5*nohab_exposure_index)**(1/7)
+                biophysical_exposure_index *= feature.GetField(risk_field)
+            rt_nohab = (5*biophysical_exposure_index)**(1/7)
+            rt_hab_service_index = rt_nohab-rt
             feature.SetField(
-                'Rt_hab_service_index', no_rhab_exposure_index)
+                'Rt_nohab', rt_nohab)
+            feature.SetField(
+                'Rt_hab_service_index', rt_hab_service_index)
             for hab_id in habitat_fieldname_list:
                 knockout_hab_risk = feature.GetField(f'Rhab_no_{hab_id}')
                 hab_knockout_exposure_index = (
-                    knockout_hab_risk*nohab_exposure_index)**(1/7)
+                    knockout_hab_risk*biophysical_exposure_index)**(1/7)
                 feature.SetField(
                     f'Rt_hab_{hab_id}_service_index',
-                    hab_knockout_exposure_index-exposure_index)
+                    hab_knockout_exposure_index-rt)
 
             cv_risk_layer.SetFeature(feature)
         cv_risk_layer.CommitTransaction()
