@@ -65,7 +65,7 @@ def main():
             args=(
                 align_path_list[0], align_path_list[1], target_path),
             target_path_list=[target_path],
-            depedent_task_list=[align_task],
+            dependent_task_list=[align_task],
             task_name=f'mask to 2m {target_path}')
     task_graph.join()
     task_graph.close()
