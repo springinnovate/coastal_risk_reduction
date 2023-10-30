@@ -33,7 +33,7 @@ def mask_to_2m(pop_path, dem_path, target_path):
         return result
 
     geoprocessing.raster_calculator(
-        [(pop_path, 1), dem_path, 1], less_than_2m, target_path,
+        [(pop_path, 1), (dem_path, 1)], less_than_2m, target_path,
         raster_info['datatype'], nodata)
 
 
