@@ -16,7 +16,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 POPULATION_RASTER_PATH_LIST = [
-    r"D:\repositories\wwf-sipa\data\pop\phl_ppp_2020.tif"
+    r"D:\repositories\wwf-sipa\data\pop\phl_ppp_2020.tif",
     r"D:\repositories\wwf-sipa\data\pop\idn_ppp_2020.tif"]
 DEM_PATH = r"D:\repositories\wwf-sipa\data\aster_dem\aster_dem.vrt"
 TARGET_DIR = r"D:\repositories\wwf-sipa\data\pop"
