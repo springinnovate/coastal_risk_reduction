@@ -52,7 +52,7 @@ def main():
         target_pixel_size = geoprocessing.get_raster_info(
             pop_path)['pixel_size']
         align_task = task_graph.add_task(
-            func=geoprocessing.align_and_resize_raster_stackm,
+            func=geoprocessing.align_and_resize_raster_stack,
             args=(
                 base_path_list, align_path_list, ['near']*2,
                 target_pixel_size, 'intersection'),
