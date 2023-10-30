@@ -56,7 +56,7 @@ def main():
             args=(
                 base_path_list, align_path_list, ['near']*2,
                 target_pixel_size, 'intersection'),
-            target_path_list=[align_path_list],
+            target_path_list=align_path_list,
             task_name=f'align {pop_path}')
         target_path = os.path.join(
             TARGET_DIR, f'less_than_2m_{os.path.basename(pop_path)}')
