@@ -2716,7 +2716,7 @@ def _process_scenario_ini(scenario_config_path):
             raise ValueError(
                 f'expected a beneficiary raster at "{beneficiary_path}" but '
                 f'nothing was found')
-    return scenario_id, scenario_id
+    return scenario_config, scenario_id
 
 
 def _parse_habitat_map(habitat_raster_path_map):
