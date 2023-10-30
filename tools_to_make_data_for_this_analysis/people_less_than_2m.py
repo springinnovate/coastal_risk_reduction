@@ -50,7 +50,7 @@ def main():
                 f'less_than_2m_{os.path.basename(path)}')
             for path in base_path_list]
         target_pixel_size = geoprocessing.get_raster_info(
-            pop_path)['target_pixel_size']
+            pop_path)['pixel_size']
         align_task = task_graph.add_task(
             func=geoprocessing.align_and_resize_raster_stackm,
             args=(
