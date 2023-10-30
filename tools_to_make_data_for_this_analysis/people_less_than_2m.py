@@ -23,7 +23,7 @@ TARGET_DIR = r"D:\repositories\wwf-sipa\data\pop"
 
 
 def mask_to_2m(pop_path, dem_path, target_path):
-    raster_info = geoprocessing.get_raster_info(pop_path)['nodata'][0]
+    raster_info = geoprocessing.get_raster_info(pop_path)
     nodata = raster_info['nodata'][0]
     if nodata is None:
         nodata = -9999
