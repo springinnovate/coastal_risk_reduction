@@ -16,9 +16,10 @@ LOGGER = logging.getLogger(__name__)
 
 
 POPULATION_RASTER_PATH_LIST = [
-    r"D:\repositories\wwf-sipa\data\pop\phl_ppp_2020.tif",
-    r"D:\repositories\wwf-sipa\data\pop\idn_ppp_2020.tif"]
-DEM_PATH = r"D:\repositories\wwf-sipa\data\aster_dem\aster_dem.vrt"
+    ('PH', r"D:\repositories\wwf-sipa\data\pop\phl_ppp_2020.tif"),
+    ('IDN', r"D:\repositories\wwf-sipa\data\pop\idn_ppp_2020.tif"),
+    ]
+DEM_PATH = r"D:\repositories\ndr_sdr_global\workspace\data\global_dem_3s_md5_22d0c3809af491fa09d03002bdf09748\dem.vrt"
 TARGET_DIR = r"D:\repositories\wwf-sipa\data\pop"
 
 
@@ -29,7 +30,7 @@ def mask_to_2m(pop_path, dem_path, target_path):
         nodata = -9999
     def less_than_2m(pop, dem):
         result = pop.copy()
-        result[dem <= 2] = nodata
+        result[dem > 2] = nodata
         return result
 
     geoprocessing.raster_calculator(
@@ -40,14 +41,15 @@ def mask_to_2m(pop_path, dem_path, target_path):
 def main():
     task_graph = taskgraph.TaskGraph(TARGET_DIR, 2, 15.0)
     temp_dir_list = []
-    for pop_path in POPULATION_RASTER_PATH_LIST:
-        working_dir = tempfile.mkdtemp(prefix='2mpop', dir=TARGET_DIR)
+    for pop_prefix, pop_path in POPULATION_RASTER_PATH_LIST:
+        working_dir = tempfile.mkdtemp(prefix=f'{pop_prefix}_2m_pop_', dir=TARGET_DIR)
         temp_dir_list.append(working_dir)
         base_path_list = [pop_path, DEM_PATH]
+
         align_path_list = [
             os.path.join(
                 working_dir,
-                f'less_than_2m_{os.path.basename(path)}')
+                f'less_than_2m_{pop_prefix}_{os.path.basename(path)}')
             for path in base_path_list]
         target_pixel_size = geoprocessing.get_raster_info(
             pop_path)['pixel_size']
@@ -69,8 +71,8 @@ def main():
             task_name=f'mask to 2m {target_path}')
     task_graph.join()
     task_graph.close()
-    for temp_dir in temp_dir_list:
-        shutil.rmtree(temp_dir)
+    # for temp_dir in temp_dir_list:
+    #     shutil.rmtree(temp_dir)
     LOGGER.info(f'ALL DONE! results in {TARGET_DIR}')
 
 
