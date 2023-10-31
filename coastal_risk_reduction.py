@@ -2243,7 +2243,11 @@ def calculate_habitat_value(
                     beneficary_coverage_band.YSize)
                 raise
             service_id = f'Rt_hab_{hab_id}_service_index'
-            service_index_value = shore_feature.GetField(service_id)
+            try:
+                service_index_value = shore_feature.GetField(service_id)
+            except KeyError:
+                LOGGER.exception(f'error on {service_id}')
+                raise
             target_value = pixel_value * service_index_value
             local_beneficiary_hab_index_band.WriteArray(
                 numpy.array([[target_value]]),
