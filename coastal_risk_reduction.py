@@ -92,6 +92,7 @@ def convolve_2d(
     base_id = os.path.basename(os.path.splitext(signal_path)[0])
     kernel_filepath = os.path.join(
         temp_workspace_dir, f'{base_id}_kernel.tif')
+    LOGGER.debug(f'*********** kernel_radius {kernel_radius}')
     create_averaging_kernel_raster(
         kernel_radius, kernel_filepath, normalize=True)
     geoprocessing.convolve_2d(
@@ -2147,28 +2148,51 @@ def calculate_habitat_value(
         store_result=True,
         task_name='clip and mask habitat layer')
 
+    # clip beneficiary
+    local_beneficiary_path = os.path.join(
+        temp_workspace_dir, f'clipped_{beneficiary_id}.tif')
+    beneficiary_clip_task = task_graph.add_task(
+        func=clip_and_reproject_raster,
+        args=(beneficiary_path, local_beneficiary_path,
+              shore_point_info['projection_wkt'],
+              shore_point_info['bounding_box'],
+              0, 'near', False, target_pixel_size),
+        target_path_list=[local_beneficiary_path],
+        task_name=f'clip {local_beneficiary_path}')
+
     # project beneficiaries onto coverage
     beneficiary_coverage_raster_path = os.path.join(
         temp_workspace_dir, f'{beneficiary_id}_coverage.tif')
     beneficiary_effect = bene_effective_dist / 111320  # approximate
     kernel_radius = [abs(beneficiary_effect / x) for x in target_pixel_size]
+    LOGGER.debug(f'************ kernel radisu {kernel_radius}')
     beneficiary_coverage_task = task_graph.add_task(
         func=convolve_2d,
         args=(
-            beneficiary_path, kernel_radius, temp_workspace_dir,
+            local_beneficiary_path, kernel_radius, temp_workspace_dir,
             beneficiary_coverage_raster_path),
         target_path_list=[beneficiary_coverage_raster_path],
+        dependent_task_list=[beneficiary_clip_task],
         task_name=(
             f'calculate beneficiary coverage for '
             f'{beneficiary_coverage_raster_path}'))
 
     habitat_raster_path_map = hab_raster_task.get()
+    merged_habitat_raster_path_map = {}
+    for (hab_id, _, hab_protective_radius), hab_raster_path_list in \
+            habitat_raster_path_map.items():
+        local_hab_raster_path = os.path.join(
+            temp_workspace_dir, f'{hab_id}.tif')
+        merge_mask_list(hab_raster_path_list, local_hab_raster_path)
+        merged_habitat_raster_path_map[(hab_id, hab_protective_radius)] = \
+            local_hab_raster_path
+
     beneficiary_coverage_task.join()
     beneficary_coverage_raster = gdal.OpenEx(
         beneficiary_coverage_raster_path, gdal.OF_RASTER)
     beneficary_coverage_band = beneficary_coverage_raster.GetRasterBand(1)
 
-    gt = beneficary_coverage_band.GetGeoTransform()
+    gt = beneficary_coverage_raster.GetGeoTransform()
     inv_gt = gdal.InvGeoTransform(gt)
     x_size = beneficary_coverage_band.XSize
     y_size = beneficary_coverage_band.YSize
@@ -2177,7 +2201,8 @@ def calculate_habitat_value(
         shore_sample_point_vector_path, gdal.OF_VECTOR)
     shore_point_layer = shore_point_vector.GetLayer()
     #TODO: get the hab list and hab mask in this function so I can access directly
-    for (hab_id, hab_protective_radius), hab_mask_path in habitat_raster_path_map.items():
+    LOGGER.debug(f'*********** {merged_habitat_raster_path_map}')
+    for (hab_id, hab_protective_radius), hab_mask_path in merged_habitat_raster_path_map.items():
         # TODO: make a new field for the {beneficiary_id}_{hab_id}_index
         local_beneficiary_hab_index_raster_path = os.path.join(
             temp_workspace_dir,
@@ -2189,7 +2214,7 @@ def calculate_habitat_value(
             local_beneficiary_hab_index_raster_path,
             gdal.OF_RASTER | gdal.GA_Update)
         local_beneficiary_hab_index_band = \
-            local_beneficiary_hab_index_raster.GetRasterBand()
+            local_beneficiary_hab_index_raster.GetRasterBand(1)
         for shore_feature in shore_point_layer:
             # TODO: calcualte bene_hab_index, write to raster and to point
 
@@ -2218,96 +2243,55 @@ def calculate_habitat_value(
                     beneficary_coverage_band.YSize)
                 raise
             service_id = f'Rt_hab_{hab_id}_service_index'
+            service_index_value = shore_feature.GetField(service_id)
+            target_value = pixel_value * service_index_value
             local_beneficiary_hab_index_band.WriteArray(
-                [[pixel_value * shore_feature.GetField(service_id)]],
+                numpy.array([[target_value]]),
                 xoff=pixel_x, yoff=pixel_y)
 
-        # TODO: convolve bene hab index to the hab effective distance
         local_beneficiary_hab_index_band = None
         local_beneficiary_hab_index_raster = None
 
-        value_raster_path = os.path.join(
-            temp_workspace_dir, f'pre_masked_{hab_id}_{beneficiary_id}_value_index.tif')
+        pre_mask_value_raster_path = os.path.join(
+            temp_workspace_dir, f'pre_masked_{hab_id}_{beneficiary_id}_value_index_coverage.tif')
         kernel_radius = [
-            abs(hab_protective_radius / x) for x in target_pixel_size]
+            abs(hab_protective_radius / x / 111320) for x in target_pixel_size]
         beneficiary_coverage_task = task_graph.add_task(
             func=convolve_2d,
             args=(
                 local_beneficiary_hab_index_raster_path, kernel_radius,
-                temp_workspace_dir, value_raster_path),
-            target_path_list=[value_raster_path],
+                temp_workspace_dir, pre_mask_value_raster_path),
+            target_path_list=[pre_mask_value_raster_path],
             task_name=(
                 f'calculate beneficiary hab coverage for '
-                f'{value_raster_path}'))
+                f'{pre_mask_value_raster_path}'))
 
         # TODO: mask it by the original habitat mask, the result is the bene hab value
         value_raster_path = os.path.join(
             results_dir, f'{hab_id}_{beneficiary_id}_value_index.tif')
-        target_nodata = -1
-        def mask_op(base_array, mask_array):
-            result = base_array.copy()
-            result[mask_array != 1] = target_nodata
-            return result
+        task_graph.add_task(
+            func=mask_raster,
+            args=(pre_mask_value_raster_path, hab_mask_path,
+                  value_raster_path),
+            dependent_task_list=[beneficiary_coverage_task],
+            target_path_list=[value_raster_path],
+            task_name=f'mask final {value_raster_path}')
 
-        geoprocessing.raster_calculator(
-            [(value_raster_path, 1), (hab_mask_path, 1)], mask_op,
-            value_raster_path, gdal.GDT_Float32, target_nodata)
-
-    return
-
-################
+    task_graph.join()
+    task_graph.close()
 
 
+def mask_raster(value_raster_path, mask_raster_path, target_raster_path):
+    target_nodata = -1
 
-    hab_value_raster_path_list = []
-    task_list = []
-    for hab_id, hab_mask_raster_path_list in habitat_raster_path_map.items():
-        process_hab_temp_workdir = os.path.join(
-            temp_workspace_dir, str(hab_id))
-        os.makedirs(process_hab_temp_workdir, exist_ok=True)
-        value_raster_path = os.path.join(
-            results_dir, f'{hab_id}_value.tif')
-        process_hab_task = task_graph.add_task(
-            func=_process_hab_value,
-            args=(
-                shore_sample_point_vector_path, hab_id,
-                process_hab_temp_workdir, hab_mask_raster_path_list,
-                target_pixel_size, value_raster_path))
-        hab_value_raster_path_list.append(value_raster_path)
-        task_list.append(process_hab_task)
-
-    for task in task_list:
-        task.join()
-
-    total_value_sum_raster_path = os.path.join(
-        results_dir, 'total_value_sum.tif')
-    LOGGER.info('calculate final total hab value')
-    aligned_path_list = [
-        os.path.join(
-            temp_workspace_dir,
-            '%s_aligned%s' % os.path.splitext(os.path.basename(path)))
-        for path in hab_value_raster_path_list]
-    geoprocessing.align_and_resize_raster_stack(
-        hab_value_raster_path_list, aligned_path_list,
-        ['near']*len(aligned_path_list),
-        target_pixel_size, 'union')
-    target_nodata = geoprocessing.get_raster_info(
-        aligned_path_list[0])['nodata'][0]
-
-    def _add_value(*array_list):
-        result = numpy.zeros(array_list[0].shape)
-        valid_mask = numpy.zeros(array_list[0].shape, dtype=bool)
-        for array in array_list:
-            local_valid_mask = array != target_nodata
-            result[local_valid_mask] += array[local_valid_mask]
-            valid_mask |= local_valid_mask
+    def mask_op(base_array, mask_array):
+        result = base_array.copy()
+        result[mask_array != 1] = target_nodata
         return result
 
     geoprocessing.raster_calculator(
-        [(path, 1) for path in aligned_path_list],
-        _add_value, total_value_sum_raster_path, gdal.GDT_Float32,
-        _VALUE_COVER_NODATA)
-    retrying_rmtree(temp_workspace_dir)
+        [(value_raster_path, 1), (mask_raster_path, 1)], mask_op,
+        target_raster_path, gdal.GDT_Float32, target_nodata)
 
 
 def _process_hab_value(
@@ -2492,8 +2476,17 @@ def clip_and_mask_habitat(
             lulc_risk_distance_mask_path)
 
     LOGGER.debug(risk_dist_raster_map)
-    for hab_id_risk_distance_tuple, mask_path in risk_dist_raster_map.items():
-        habitat_raster_risk_map[hab_id_risk_distance_tuple].extend(mask_path)
+    for hab_id_risk_distance_tuple, mask_path_list in risk_dist_raster_map.items():
+        for mask_path in mask_path_list:
+            local_mask_path = os.path.join(
+                workspace_dir, os.path.basename(mask_path))
+            geoprocessing.warp_raster(
+                mask_path, target_pixel_size, local_mask_path,
+                'mode', target_bb=target_bb,
+                target_projection_wkt=target_projection_wkt,
+                working_dir=workspace_dir)
+            habitat_raster_risk_map[hab_id_risk_distance_tuple].append(
+                local_mask_path)
 
     for reclassify_thread in reclassify_threads:
         reclassify_thread.join()
@@ -2792,9 +2785,9 @@ def main():
             task_name=f'calculate CV for {scenario_id}')
         calculate_cv_vector_task.join()
 
-        LOGGER.info('starting hab value calc')
+        LOGGER.info('************starting hab value calc on ' + scenario_config[BENEFICIARIES_MAP_KEY])
         for beneficiary_id, (effective_dist, beneficiary_path) in \
-                scenario_config[BENEFICIARIES_MAP_KEY]:
+                eval(scenario_config[BENEFICIARIES_MAP_KEY]).items():
             calculate_habitat_value(
                 target_cv_vector_path, scenario_config, beneficiary_id,
                 effective_dist, beneficiary_path, local_habitat_value_dir)
